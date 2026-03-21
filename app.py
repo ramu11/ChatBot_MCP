@@ -4,10 +4,6 @@ from agent import run_agent
 
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return render_template("chat.html")
-
 # Environment Variables
 USER_KEY = os.getenv("USER_KEY")
 MODEL_API = os.getenv("MODEL_API")
@@ -16,13 +12,17 @@ TOKEN = os.getenv("TOKEN")
 # Global message history for the session
 messages = []
 
-# Tool definitions mapped to MCP capabilities
+# IMPROVISED Tool definitions: Refined to match your "No Closed Cases" & "Jira Focus" rules
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "get_support_case",
-            "description": "Fetch details for a specific 8-digit Red Hat support case ID.",
+            "description": (
+                "DEEP SCAN: Use this for specific 8-digit Case IDs. "
+                "Retrieves case details PLUS technical comments and Jira tracker updates "
+                "to provide Status, Target Release, and Progress summaries."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -36,29 +36,37 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_cases",
-            "description": "Search Red Hat cases by keyword, status, and SBR group.",
+            "description": (
+                "FILTER SEARCH: Finds active cases (Waiting on Red Hat/Customer/Engineering). "
+                "Results are automatically sorted with the LATEST modified cases at the top."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "keyword": {"type": "string"},
-                    "statuses": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "default": ["Waiting on Red Hat"]
-                    },
+                    "keyword": {"type": "string", "description": "Search term or SBR name."},
                     "sbrs": {
                         "type": "array",
                         "items": {
                             "type": "string", 
-                            "enum": ["FuseSource", "Messaging", "JBoss Security", "RHOAI", "RHEL AI"]
+                            "enum": [
+                                "Ansible", "API Mgmt", "Business Rule Frameworks", "FuseSource", 
+                                "Identity Management", "JBoss Base AS", "JBoss Clustering", 
+                                "JBoss Security", "JVM & Diagnostics", "Messaging", "Networking", 
+                                "RHOAI", "Security Vulnerabilities", "Services", "Shift", "Webservers"
+                            ]
                         }
-                    }
+                    },
+                    "maxResults": {"type": "integer", "default": 20}
                 },
                 "required": ["keyword"]
             }
         }
     }
 ]
+
+@app.route("/")
+def home():
+    return render_template("chat.html")
 
 @app.route("/chat", methods=["POST"])
 def chat():
@@ -68,25 +76,26 @@ def chat():
     if not user_msg:
         return jsonify({"reply": "No message received."}), 400
 
-    # Add user message to history
-    messages.append({
-        "role": "user",
-        "content": user_msg
-    })
+    # 1. Update session history
+    messages.append({"role": "user", "content": user_msg})
 
-    # Call the updated agent logic
-    # Note: messages is passed as a list
-    answer = run_agent(messages, USER_KEY, MODEL_API, TOKEN)
+    # 2. Call Agent (Internal logic handles tool selection and deep scanning)
+    try:
+        answer = run_agent(messages, USER_KEY, MODEL_API, TOKEN)
+    except Exception as e:
+        answer = f"Agent Error: {str(e)}"
 
-    # Store assistant's response to maintain conversation history
-    messages.append({
-        "role": "assistant",
-        "content": answer
-    })
+    # 3. Store response
+    messages.append({"role": "assistant", "content": answer})
 
     return jsonify({"reply": answer})
 
-if __name__ == "__main__":
-    # Standard Flask port
-    app.run(port=5000, debug=True)
+@app.route("/reset", methods=["POST"])
+def reset():
+    """Utility to clear chat history without restarting server."""
+    global messages
+    messages = []
+    return jsonify({"status": "History cleared"})
 
+if __name__ == "__main__":
+    app.run(port=5000, debug=True)

@@ -1,131 +1,114 @@
-# agent.py — Orchestrates LLM + MCP tool calls
-
 import json
 import re
+from datetime import datetime, timedelta
 from llm import ask_llm
 from tools.tool_router import execute_tool
 
 def run_agent(messages, user_key, model_api, token):
-    """
-    Handles three logic flows:
-    1. Generic Search: No tool call, just LLM.
-    2. MCP Case ID: Specific 8-digit search.
-    3. MCP Filter: Search for Jiras/Messaging cases.
-    """
-
-    # STEP 0 — Initialize System Instruction
+    # 1. Initialize System Instructions if not present
     if not messages or messages[0].get("role") != "system":
         messages.insert(0, {
             "role": "system",
             "content": (
-                "You are a helpful Red Hat Support Assistant. "
-                "Format answers using short paragraphs and bullet points. "
-                "If tool results contain 'jira_links', you MUST list each one as a clickable Markdown link. "
-                "Example: [Link Jira (RHOAIRFE-730)](https://issues.redhat.com)"
+                "You are a Red Hat Support Assistant. Summarize cases and Jira progress.\n"
+                "CRITICAL RULES:\n"
+                "- Only show cases that match the user's requested SBR (e.g., Messaging).\n"
+                "- List cases in the order provided (Latest/Newest first).\n"
+                "- For Jiras, state: **Status**, **Target Release**, and **Progress**.\n"
+                "- Use clickable Markdown links: [Jira ID](https://issues.redhat.com/browse/ID)."
             )
         })
 
-    # STEP 1 — Logic Detection
     last_user_msg = messages[-1]["content"].lower()
     
-    # 1a. Detection for MCP: 8-digit Case ID
+    # ID Detection (8-digit Case ID)
     id_match = re.search(r"(\d{8})", last_user_msg)
     case_id = id_match.group(1) if id_match else None
-
-    # 1b. Detection for MCP: Filter Search
-    mcp_filter_keywords = ["search", "filter", "find cases", "monitor"]
-    is_mcp_filter = any(kw in last_user_msg for kw in mcp_filter_keywords)
+    
+    # Filter/Search Detection
+    is_mcp_filter = any(kw in last_user_msg for kw in ["search", "filter", "find", "cases", "list", "monitor"])
 
     tool_to_call = None
     tool_args = {}
 
+    # Logic for Single Case Deep Scan
     if case_id:
-        # FLOW 2a: Search by Case ID
         tool_to_call = "get_support_case"
         tool_args = {"case_id": case_id}
+    
+    # Logic for Keyword/SBR Search
     elif is_mcp_filter:
-        # FLOW 2b: Filter Search
         tool_to_call = "search_cases"
+        now = datetime.utcnow()
+        start_dt = now - timedelta(days=180)
         
-        clean_kw = last_user_msg
-        for kw in ["search", "filter", "find", "cases"]:
-            clean_kw = clean_kw.replace(kw, "")
+        # ACTIVE STATUSES ONLY
+        active_statuses = ["Waiting on Red Hat", "Waiting on Customer", "Waiting on Engineering"]
         
-        available_sbrs = ["FuseSource", "Messaging", "JBoss Security", "RHOAI", "RHEL AI"]
-        matched_sbrs = [sbr for sbr in available_sbrs if sbr.lower() in last_user_msg]
-
+        # STRICT SBR DETECTION (Ensures 'Messaging' focus)
+        requested_sbrs = []
+        if "messaging" in last_user_msg:
+            requested_sbrs = ["Messaging"]
+        elif "rhoai" in last_user_msg:
+            requested_sbrs = ["RHOAI"]
+            
         tool_args = {
-            "keyword": clean_kw.strip(),
-            "statuses": ["Waiting on Red Hat"],
-            "sbrs": matched_sbrs if matched_sbrs else available_sbrs
+            "keyword": "", 
+            "statuses": active_statuses,
+            "sbrs": requested_sbrs,
+            "includeClosed": False,
+            "startDate": start_dt.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+            "endDate": now.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+            "maxResults": 50
         }
 
-    # STEP 2 — Execute MCP Tool and Process Results
     if tool_to_call:
         try:
-            tool_output = execute_tool(tool_to_call, tool_args)
-            
-            # Standardize tool output to dict
-            if isinstance(tool_output, str):
-                try:
-                    tool_result = json.loads(tool_output)
-                except json.JSONDecodeError:
-                    tool_result = {"result": tool_output}
-            else:
-                tool_result = tool_output
-
-            # Helper: Extract ALL Jira IDs matching your specific project codes
-            def get_jira_links(data_obj):
-                # Regex for your specific project codes
-                jira_pattern = r'\b(RHOAIRFE|ENTMQST|ENTMQBR|DBZ|QUARKUS)-[0-9]+\b'
-                # Convert object to string to scan all fields (deep scan)
+            # UNIVERSAL JIRA EXTRACTOR (Captures SRVKP, AAP, AMQ, OCP, etc.)
+            def extract_jira_details(data_obj):
+                jira_pattern = r'\b([A-Z]{2,10}-[0-9]+)\b'
                 raw_text = json.dumps(data_obj)
                 found_ids = sorted(list(set(re.findall(jira_pattern, raw_text))))
-                
-                links = []
+                details = []
                 for jid in found_ids:
-                    links.append({
+                    # Capture context around the ID for Status/Target hints
+                    ctx = re.search(rf"(.{{0,50}}{jid}.{{0,50}})", raw_text, re.IGNORECASE | re.DOTALL)
+                    clean_ctx = ctx.group(1).replace("\\n", " ").strip() if ctx else "Mentioned in case."
+                    
+                    details.append({
                         "id": jid, 
-                        "url": f"https://issues.redhat.com{jid}"
+                        "url": f"https://issues.redhat.com/browse/{jid}", 
+                        "context": clean_ctx
                     })
-                return links
+                return details
 
-            # Process single case results
-            jira_info = get_jira_links(tool_result)
-            if jira_info:
-                tool_result["jira_links"] = jira_info
-                # Keep jira_url for backward compatibility
-                tool_result["jira_url"] = jira_info[0]["url"]
+            # Call the primary tool (Router handles the bridge to the Server)
+            primary_output = execute_tool(tool_to_call, tool_args)
+            tool_result = json.loads(primary_output) if isinstance(primary_output, str) else primary_output
 
-            # Process list of cases (from search_cases)
-            # The API usually returns a list under 'cases' or 'results'
-            case_list = tool_result.get("cases", []) or tool_result.get("results", [])
-            if isinstance(case_list, list):
-                for case in case_list:
-                    c_jira_info = get_jira_links(case)
-                    if c_jira_info:
-                        case["jira_links"] = c_jira_info
-                        case["jira_url"] = c_jira_info[0]["url"]
+            # DEEP SCAN: If fetching a specific case, look at comments and trackers
+            if tool_to_call == "get_support_case" and "error" not in tool_result:
+                c_num = tool_result.get("case_id")
+                comments = execute_tool("list_case_comments", {"case_number": c_num})
+                trackers = execute_tool("get_external_updates", {"case_number": c_num})
+                
+                # Combine Jira findings from all three sources
+                all_jiras = extract_jira_details(tool_result) + extract_jira_details(comments) + extract_jira_details(trackers)
+                
+                # De-duplicate Jiras by ID
+                unique_jiras = {j["id"]: j for j in all_jiras}
+                tool_result["jira_updates"] = list(unique_jiras.values())
+                
+                # Include the latest technical comment for the LLM to summarize
+                if isinstance(comments, list) and len(comments) > 0:
+                    tool_result["latest_tech_update"] = comments[0].get("text", "")[:600]
 
-            tool_result_str = json.dumps(tool_result, separators=(",", ":"))
-            messages.append({
-                "role": "user",
-                "content": f"MCP Tool Result ({tool_to_call}):\n{tool_result_str}"
-            })
-
+            # Feedback to LLM
+            messages.append({"role": "user", "content": f"Tool Result (Latest First): {json.dumps(tool_result)}"})
+            
         except Exception as e:
-            messages.append({"role": "user", "content": f"MCP Tool Error: {str(e)}"})
+            messages.append({"role": "user", "content": f"Internal Agent Error: {str(e)}"})
 
-    # STEP 3 — LLM Final Response
-    response = ask_llm(messages, user_key, model_api)
-    
-    try:
-        msg_content = response["choices"][0]["message"].get("content", "")
-    except (KeyError, IndexError, TypeError):
-        try:
-            msg_content = response["choices"]["message"].get("content", "")
-        except:
-            msg_content = "I'm sorry, I couldn't process that request."
-
-    return msg_content
-
+    # Final call to LLM for professional summary
+    response_data = ask_llm(messages, user_key, model_api)
+    return response_data["choices"][0]["message"].get("content")

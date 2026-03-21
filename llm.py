@@ -11,8 +11,7 @@ def ask_llm(messages, user_key, model_api, model_id="gemini-2.0-flash"):
     """
     Sends messages to the Gemini LLM.
     The agent.py logic handles tool execution and injects results
-    (including case-sensitive plural statuses) into the messages list
-    before calling this function.
+    into the messages list before calling this function.
     """
 
     # Ensure we use the correct completions endpoint
@@ -28,7 +27,7 @@ def ask_llm(messages, user_key, model_api, model_id="gemini-2.0-flash"):
         "model": model_id,
         "messages": messages,
         "temperature": 0.0,
-        "max_tokens": 2000  # Allows for detailed case summaries and link formatting
+        "max_tokens": 2000  # Allows for detailed case summaries and Jira link formatting
     }
 
     # DEBUG - Helpful for verifying the injected MCP tool results
@@ -40,18 +39,15 @@ def ask_llm(messages, user_key, model_api, model_id="gemini-2.0-flash"):
             headers=headers,
             json=payload,
             verify=False,
-            timeout=30 # Prevent hanging on slow API responses
+            timeout=60 # Matches the robust processing needed for deep Jira scans
         )
 
         response.raise_for_status()
-        result = response.json()
-
-        return result
+        return response.json()
 
     except requests.exceptions.RequestException as e:
         print(f"[LLM] Error: {str(e)}")
-        # Return a structured error response that agent.py can parse
-        # This prevents the app from crashing if the LLM is unreachable
+        # Return a structured error response that agent.py can parse safely
         return {
             "choices": [
                 {
@@ -62,4 +58,3 @@ def ask_llm(messages, user_key, model_api, model_id="gemini-2.0-flash"):
                 }
             ]
         }
-

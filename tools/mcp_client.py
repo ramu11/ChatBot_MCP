@@ -1,5 +1,7 @@
 import asyncio
 import os
+import sys
+import traceback
 from mcp.client.stdio import stdio_client, StdioServerParameters
 from mcp import ClientSession
 
@@ -23,8 +25,9 @@ async def run_tool(name, args):
         return {"error": f"Server script not found at {abs_path}"}
 
     # Define parameters for the MCP stdio transport
+    # Using sys.executable ensures the server runs in the same environment as the client
     server_params = StdioServerParameters(
-        command="python",
+        command=sys.executable,
         args=[abs_path],
         env=os.environ.copy()
     )
@@ -38,18 +41,22 @@ async def run_tool(name, args):
                 # Call the specific tool
                 result = await session.call_tool(name, args)
 
+                # --- NEW: Check for explicit MCP Error flag ---
+                if hasattr(result, 'isError') and result.isError:
+                    err_text = result.content[0].text if result.content else "Unknown error"
+                    sys.stderr.write(f"--- TOOL ERROR: {name} ---\n{err_text}\n")
+                    return {"error": f"Tool execution failed: {err_text}"}
+
                 # CORRECT EXTRACTION: result.content is a LIST of TextContent objects
                 if hasattr(result, 'content') and len(result.content) > 0:
                     # Access the first element of the list [0] and get its text
                     return result.content[0].text  
                 
-                # Fallback for structured content if text content is missing
-                if hasattr(result, 'isError') and result.isError:
-                    return {"error": "Tool execution failed on server"}
-
                 return str(result)
 
     except Exception as e:
+        # LOGGING: Write full traceback to stderr for debugging
+        sys.stderr.write(f"--- MCP FATAL SESSION ERROR ---\n{traceback.format_exc()}\n")
         return {"error": f"MCP Session Failed: {str(e)}"}
 
 def call_tool(name, args):
@@ -57,7 +64,8 @@ def call_tool(name, args):
     Wrapper to call async MCP tool from synchronous Flask/Agent code.
     """
     try:
+        # Standard execution for synchronous bridge
         return asyncio.run(run_tool(name, args))
     except Exception as e:
+        # Catch runtime errors (e.g., if an event loop is already running)
         return {"error": f"Runtime Error: {str(e)}"}
-
