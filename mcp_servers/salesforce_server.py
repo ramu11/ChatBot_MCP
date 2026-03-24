@@ -1,17 +1,17 @@
 import requests
 import os
 import sys
-from typing import List, Optional, Union
+from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
 
-# Initialize FastMCP server
+# Initialize the FastMCP server
 mcp = FastMCP("redhat-support-server")
 
-# Your working Base URL for Red Hat Case API
+# The authenticated Red Hat Case API endpoint
 BASE_URL = "https://api.access.redhat.com/support/v1/cases"
 
 def get_headers():
-    """Helper to get authentication headers from environment variables."""
+    """Helper to pull the Red Hat API Token from the environment."""
     token = os.getenv("TOKEN")
     return {
         "Authorization": f"Bearer {token}",
@@ -20,100 +20,94 @@ def get_headers():
     }
 
 @mcp.tool()
-def get_support_case(case_id: str):
-    """Fetch details for a specific 8-digit Red Hat support case by ID."""
+def get_support_case(case_id: str) -> Dict[str, Any]:
+    """
+    Fetch primary details for a specific 8-digit Red Hat support case.
+    Captures core fields and structured external trackers for Jira detection.
+    """
     url = f"{BASE_URL}/{case_id}"
     try:
-        sys.stderr.write(f"DEBUG: Fetching case {case_id}\n")
+        sys.stderr.write(f"DEBUG: MCP calling get_support_case for {case_id}\n")
         response = requests.get(url, headers=get_headers(), timeout=15)
         
         if response.status_code != 200:
-            return {"error": f"Failed to fetch case {case_id}", "status": response.status_code}
+            return {"error": "NotFound", "status": response.status_code}
             
         data = response.json()
-        # Return a cleaned object for the Agent to process
+        sys.stderr.write(f"DEBUG: API returned keys: {list(data.keys())}\n")
+        
+        # UNIVERSAL MAPPER: Standardizing the response for the Agent
         return {
-            "case_id": case_id,
-            "summary": data.get("caseSummary") or data.get("summary"),
-            "status": data.get("status"),
-            "sbr": data.get("sbr"),
-            "severity": data.get("severity"),
-            "full_data": data
+            "caseNumber": data.get("caseNumber") or data.get("number") or case_id,
+            "summary": data.get("summary") or data.get("caseSummary") or data.get("title") or "No Summary",
+            "status": data.get("status") or data.get("state") or "Unknown",
+            "severity": data.get("severity") or data.get("priority") or "Normal",
+            "product": data.get("product") or data.get("service") or "N/A",
+            "description": data.get("description") or data.get("details") or "No description provided.",
+            # Include structured trackers if they exist in the header
+            "externalTrackers": data.get("externalTrackers") or data.get("bugzillas") or []
         }
     except Exception as e:
-        return {"error": f"Connection failed: {str(e)}"}
+        sys.stderr.write(f"ERROR: get_support_case failed: {str(e)}\n")
+        return {"error": str(e)}
 
 @mcp.tool()
-def search_cases(
-    keyword: Optional[str] = "",
-    statuses: Optional[list] = None, 
-    sbrs: Optional[list] = None,
-    startDate: Optional[str] = None,
-    endDate: Optional[str] = None,
-    maxResults: int = 50,
-    includeClosed: bool = False
-):
+def search_cases(sbrs: List[str] = None, maxResults: int = 20) -> Dict[str, Any]:
     """
-    Search active Red Hat cases. 
-    Enforces 'Waiting' statuses and sorts by Latest Modified first.
+    Search active Red Hat cases based on SBR or status via the filter endpoint.
     """
     url = f"{BASE_URL}/filter"
-    
-    # STRICT DEFAULT: Only pull cases waiting for action (excludes Closed/Resolved)
-    active_only = ["Waiting on Red Hat", "Waiting on Customer", "Waiting on Engineering"]
-    
     payload = {
-        "keyword": keyword if keyword else "",
-        "statuses": statuses if statuses else active_only,
-        "sbrs": sbrs if sbrs else [],
+        "statuses": ["Waiting on Red Hat", "Waiting on Engineering", "Waiting on Customer"],
+        "sbrs": sbrs or [],
         "maxResults": maxResults,
-        "includeClosed": includeClosed, 
-        "startDate": startDate,
-        "endDate": endDate,
-        "sortField": "lastModifiedDate", # Crucial for 'Latest First' requirement
-        "sortOrder": "desc"             # Newest updates at the top
+        "sortField": "lastModifiedDate",
+        "sortOrder": "desc"
     }
     
-    # Remove None values to keep the API happy
-    payload = {k: v for k, v in payload.items() if v is not None}
-
     try:
-        sys.stderr.write(f"DEBUG: Search payload: {payload}\n")
-        response = requests.post(url, headers=get_headers(), json=payload, timeout=15)
-        response.raise_for_status()
+        sys.stderr.write(f"DEBUG: MCP calling search_cases for SBRs: {sbrs}\n")
+        res = requests.post(url, headers=get_headers(), json=payload, timeout=15)
+        res.raise_for_status()
         
-        data = response.json()
-        
-        # Consistent format: Always return a dict with a 'cases' list
-        if isinstance(data, list):
-            return {"cases": data, "count": len(data)}
-        return data 
-        
+        data = res.json()
+        return {"cases": data if isinstance(data, list) else [data]}
     except Exception as e:
-        return {"error": "Search failed", "details": str(e)}
+        sys.stderr.write(f"ERROR: search_cases failed: {str(e)}\n")
+        return {"error": f"Case search failed: {str(e)}"}
 
 @mcp.tool()
-def list_case_comments(case_number: str):
-    """Retrieve full history of comments. Used for Deep Scan to find Jira progress."""
+def list_case_comments(case_number: str) -> List[Any]:
+    """
+    Retrieve history of technical comments. 
+    Returns raw list to allow Agent's Regex to scan for hidden Jiras.
+    """
     url = f"{BASE_URL}/{case_number}/comments"
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
-        response.raise_for_status()
-        return response.json()
+        sys.stderr.write(f"DEBUG: MCP fetching comments for {case_number}\n")
+        res = requests.get(url, headers=get_headers(), timeout=15)
+        res.raise_for_status()
+        return res.json()
     except Exception as e:
-        return {"error": f"Comments fetch failed: {str(e)}"}
+        sys.stderr.write(f"WARNING: Comment fetch failed: {str(e)}\n")
+        return []
 
 @mcp.tool()
-def get_external_updates(case_number: str):
-    """Retrieve official Jira/Bugzilla sync data (Status & Target Releases)."""
+def get_external_updates(case_number: str) -> List[Any]:
+    """
+    Retrieve official Jira/Bugzilla sync data (External Trackers).
+    Essential for the Triple-Scan logic.
+    """
     url = f"{BASE_URL}/{case_number}/externaltrackerupdates"
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
-        response.raise_for_status()
-        return response.json()
+        sys.stderr.write(f"DEBUG: MCP fetching tracker updates for {case_number}\n")
+        res = requests.get(url, headers=get_headers(), timeout=15)
+        res.raise_for_status()
+        return res.json()
     except Exception as e:
-        return {"error": f"Tracker fetch failed: {str(e)}"}
+        sys.stderr.write(f"WARNING: Tracker fetch failed: {str(e)}\n")
+        return []
 
 if __name__ == "__main__":
-    # Runs the MCP server logic
+    # Required for the stdio_client in mcp_client.py
     mcp.run()
