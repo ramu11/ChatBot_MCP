@@ -12,6 +12,7 @@ mcp = FastMCP("redhat-support-server")
 SF_BASE_URL = "https://api.access.redhat.com/support/v1/cases"
 JIRA_API_URL = "https://redhat.atlassian.net/rest/api/3/issue"
 
+
 def get_sf_headers():
     """Helper to pull the Red Hat Salesforce API Token."""
     token = os.getenv("TOKEN")
@@ -21,13 +22,19 @@ def get_sf_headers():
         "Content-Type": "application/json"
     }
 
+
 def get_jira_auth():
     """Helper for Jira Basic Auth credentials mirroring curl -u."""
     email = os.getenv("EMAIL")
     jira_token = os.getenv("JIRA_TOKEN")
+
+    # 🔍 Debug logs (safe)
+    sys.stderr.write(f"[DEBUG] EMAIL: {email}\n")
+    sys.stderr.write(f"[DEBUG] TOKEN LENGTH: {len(jira_token) if jira_token else 0}\n")
+
     return (email, jira_token)
-    
-    
+
+
 def flatten_adf(node):
     """Recursively converts Jira ADF JSON to plain text."""
     if isinstance(node, list):
@@ -37,7 +44,8 @@ def flatten_adf(node):
             return node.get("text", "")
         return flatten_adf(node.get("content", []))
     return ""
-    
+
+
 @mcp.tool()
 def get_support_case(case_id: str) -> Dict[str, Any]:
     """
@@ -45,14 +53,16 @@ def get_support_case(case_id: str) -> Dict[str, Any]:
     """
     url = f"{SF_BASE_URL}/{case_id}"
     try:
-        sys.stderr.write(f"DEBUG: MCP calling get_support_case for {case_id}\n")
+        sys.stderr.write(f"[DEBUG] Fetching case: {case_id}\n")
+
         response = requests.get(url, headers=get_sf_headers(), timeout=15)
-        
+
         if response.status_code != 200:
-            sys.stderr.write(f"ERROR: Salesforce returned {response.status_code}\n")
+            sys.stderr.write(f"[ERROR] Salesforce returned {response.status_code}\n")
             return {"error": f"Case {case_id} not found", "status": response.status_code}
-            
+
         data = response.json()
+
         return {
             "caseNumber": data.get("caseNumber") or data.get("number") or case_id,
             "summary": data.get("summary") or data.get("title") or "No Summary",
@@ -62,47 +72,128 @@ def get_support_case(case_id: str) -> Dict[str, Any]:
             "description": data.get("description") or "No description provided.",
             "externalTrackers": data.get("externalTrackers") or []
         }
+
     except Exception as e:
-        sys.stderr.write(f"CRITICAL ERROR: get_support_case: {str(e)}\n")
+        sys.stderr.write(f"[CRITICAL] get_support_case failed: {str(e)}\n")
         return {"error": str(e)}
+
 
 @mcp.tool()
 def get_jira_details(jira_id: str) -> Dict[str, Any]:
     url = f"{JIRA_API_URL}/{jira_id}"
     headers = {"Accept": "application/json"}
+
     try:
+        sys.stderr.write(f"[DEBUG] Jira ID: {jira_id}\n")
+
         auth = get_jira_auth()
+
         res = requests.get(url, auth=auth, headers=headers, timeout=15)
+
+        sys.stderr.write(f"[DEBUG] Jira API STATUS: {res.status_code}\n")
+
         if res.status_code != 200:
+            sys.stderr.write(f"[ERROR] Jira API failed: {res.text}\n")
             return {"error": f"Jira {jira_id} not accessible"}
 
         data = res.json()
         fields = data.get("fields", {})
 
-        # Fetch Comments
-        c_res = requests.get(f"{url}/comment?maxResults=3&orderBy=-created", auth=auth, headers=headers, timeout=10)
-        comments_data = c_res.json().get("comments", []) if c_res.status_code == 200 else []
-        
+        # =========================
+        # COMMENTS FIX (PRIMARY SOURCE)
+        # =========================
         recent_comments = []
-        for c in comments_data:
-            body = c.get("body")
-            # This line uses the new flattener
-            plain_text = flatten_adf(body) if isinstance(body, dict) else str(body)
-            recent_comments.append({
-                "author": c.get("author", {}).get("displayName", "Engineer"),
-                "body": plain_text.strip()
-            })
+
+        embedded_comments = fields.get("comment", {}).get("comments", [])
+
+        if embedded_comments:
+            for c in embedded_comments[-3:]:
+                body = c.get("body")
+                plain_text = flatten_adf(body) if isinstance(body, dict) else str(body)
+
+                if plain_text.strip():
+                    recent_comments.append({
+                        "author": c.get("author", {}).get("displayName", "Engineer"),
+                        "body": plain_text.strip()
+                    })
+
+        # =========================
+        # FALLBACK (API)
+        # =========================
+        if not recent_comments:
+            try:
+                c_res = requests.get(
+                    f"{url}/comment?maxResults=3&orderBy=-created",
+                    auth=auth,
+                    headers=headers,
+                    timeout=10
+                )
+
+                sys.stderr.write(f"[DEBUG] Comments API STATUS: {c_res.status_code}\n")
+
+                if c_res.status_code == 200:
+                    comments_data = c_res.json().get("comments", [])
+
+                    for c in comments_data:
+                        body = c.get("body")
+                        plain_text = flatten_adf(body) if isinstance(body, dict) else str(body)
+
+                        if plain_text.strip():
+                            recent_comments.append({
+                                "author": c.get("author", {}).get("displayName", "Engineer"),
+                                "body": plain_text.strip()
+                            })
+
+            except Exception as e:
+                sys.stderr.write(f"[ERROR] Comment fallback failed: {str(e)}\n")
+
+        # =========================
+        # SAFE FIELD EXTRACTION
+        # =========================
+
+        components = [c.get("name") for c in fields.get("components", [])]
+        versions = [v.get("name") for v in fields.get("versions", [])]
+
+        description_text = flatten_adf(fields.get("description", {}))
+
+        # Extract errors
+        import re
+        error_patterns = [
+            r"Exception.*",
+            r"Error.*",
+            r"HTTP\s\d{3}",
+            r"status\s<\d+>"
+        ]
+
+        errors_found = []
+        for pattern in error_patterns:
+            errors_found.extend(re.findall(pattern, description_text))
+
+        # Jira HREF (IMPORTANT FIX)
+        jira_link = f"https://redhat.atlassian.net/browse/{jira_id}"
 
         return {
-            "key": data.get("key"),
+            "key": jira_id,
+            "href": jira_link,
             "status": fields.get("status", {}).get("name"),
             "summary": fields.get("summary"),
-            "target_version": fields.get("customfield_12345", "None Set"), 
-            "recent_comments": recent_comments
+            "priority": fields.get("priority", {}).get("name"),
+            "issue_type": fields.get("issuetype", {}).get("name"),
+            "components": components,
+            "versions": versions,
+            "environment": flatten_adf(fields.get("environment", {})),
+            "description": description_text[:1000],
+            "errors": list(set(errors_found)),
+            "recent_comments": recent_comments,
+            "created": fields.get("created"),
+            "updated": fields.get("updated")
         }
+
     except Exception as e:
+        sys.stderr.write(f"[CRITICAL] Jira processing failed: {str(e)}\n")
         return {"error": str(e)}
-        
+
+
 @mcp.tool()
 def list_case_comments(case_number: str) -> List[Any]:
     """Retrieve history of technical Salesforce comments."""
@@ -112,8 +203,10 @@ def list_case_comments(case_number: str) -> List[Any]:
         if res.status_code == 200:
             return res.json()
         return []
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] list_case_comments: {str(e)}\n")
         return []
+
 
 @mcp.tool()
 def get_external_updates(case_number: str) -> List[Any]:
@@ -124,13 +217,16 @@ def get_external_updates(case_number: str) -> List[Any]:
         if res.status_code == 200:
             return res.json()
         return []
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] get_external_updates: {str(e)}\n")
         return []
+
 
 @mcp.tool()
 def search_cases(sbrs: List[str] = None, maxResults: int = 20) -> Dict[str, Any]:
     """Search active Red Hat cases."""
     url = f"{SF_BASE_URL}/filter"
+
     payload = {
         "statuses": ["Waiting on Red Hat", "Waiting on Engineering", "Waiting on Customer"],
         "sbrs": sbrs or [],
@@ -138,13 +234,21 @@ def search_cases(sbrs: List[str] = None, maxResults: int = 20) -> Dict[str, Any]
         "sortField": "lastModifiedDate",
         "sortOrder": "desc"
     }
+
     try:
         res = requests.post(url, headers=get_sf_headers(), json=payload, timeout=15)
         res.raise_for_status()
+
         data = res.json()
-        return {"cases": data if isinstance(data, list) else [data]}
+
+        return {
+            "cases": data if isinstance(data, list) else [data]
+        }
+
     except Exception as e:
+        sys.stderr.write(f"[ERROR] search_cases failed: {str(e)}\n")
         return {"error": f"Search failed: {str(e)}"}
+
 
 if __name__ == "__main__":
     mcp.run()

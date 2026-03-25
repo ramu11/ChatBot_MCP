@@ -1,100 +1,381 @@
-I have updated the README to include the new Logic 5: Hybrid & General Query Handling and added a dedicated Search & Query Strings section. This ensures users know exactly how to trigger the different "Logics" you've built into agent.py.
+---
 
-ChatBot_MCP
-Red Hat Support Assistant (MCP Edition)
-An intelligent support agent that leverages the Model Context Protocol (MCP) to fetch and filter Red Hat support cases, identify related Jira issues, and provide technical summaries using Gemini.
+# ChatBot_MCP
 
-🚀 Features
-Logic 1: Deep Case Analysis – Automatically triggers a "Triple-Scan" (Case Details + Comments + External Trackers) when an 8-digit ID is detected.
+## Red Hat Support Assistant (MCP Edition)
 
-Logic 2: Direct Jira Enrichment – When a Jira ID is provided directly, the agent calls the Jira MCP tool to fetch real-time engineering status and comments.
+An intelligent support agent that leverages the **Model Context Protocol (MCP)** to fetch and analyze Red Hat support cases, enrich them with Jira data, and generate concise technical summaries using an LLM.
 
-Logic 3: Intelligent Filtering – Monitors active cases ("Waiting" statuses only) with a focus on specific SBRs like Messaging or RHOAI.
+---
 
-Logic 4: Chronological Priority – Server-side sorting ensures the Latest/Newest modified cases are always presented first.
+# 🚀 Features
 
-Logic 5: Hybrid & General Query Handling – Smart routing that handles Case/Jira combinations, "No Jira" scenarios, and general conversational queries without breaking.
+### 🔍 Logic 1: Deep Case Analysis (Triple-Scan)
 
-📂 Project Structure & File Descriptions
-🌐 Frontend & Entry
-app.py: The Flask web server. It manages chat sessions and defines the TOOLS manifest.
+Automatically triggers a full scan when an 8-digit case ID is detected:
 
-🧠 Orchestration (The Brain)
-agent.py: The core logic engine. Performs Regex detection for Case/Jira IDs and orchestrates the Priority Cascade (Salesforce -> Jira -> LLM).
+* Case Details
+* Case Comments
+* External Tracker Updates
 
-llm.py: The bridge to the Gemini API. Handles timeouts and formats the final technical summary.
+This ensures **no Jira reference is missed**.
 
-🛠️ Tooling & Infrastructure
-salesforce_server.py: The FastMCP server (The Engine Room). Communicates with Red Hat APIs and the Jira Atlassian REST API.
+---
 
-tool_router.py: The security gatekeeper. Routes authorized tool requests from the agent to the MCP client.
+### 🔗 Logic 2: Direct Jira Enrichment
 
-🔍 Search & Query Strings
-The agent uses specific regex patterns to determine the execution path. Use the following strings to trigger different workflows:
+When a Jira ID (e.g., `CSB-7587`) is detected:
 
-1. Salesforce Case Queries (8-Digit Numeric)
-Trigger Logic: get_support_case + list_case_comments + get_external_updates
+* Calls Jira MCP tool (`get_jira_details`)
+* Fetches:
 
-Query: "Show status for case 04210225"
+  * Status
+  * Summary
+  * Priority
+  * Components / Versions
+  * **Jira comments (ADF → plain text)**
 
-Query: "What is the latest on 03991244?"
+---
 
-2. Direct Jira Queries (Project-Number Format)
-Trigger Logic: Direct call to get_jira_details via Jira MCP tool.
+### 🧠 Logic 3: Intelligent Filtering
 
-Query: "Check the status of ENTMQBR-10429"
+Supports filtering of active cases:
 
-Query: "Give me details on RHOAI-4521"
+* Status:
 
-3. Hybrid Queries (Both Case and Jira)
-Trigger Logic: Salesforce Deep Scan + Targeted Jira Enrichment.
+  * Waiting on Red Hat
+  * Waiting on Engineering
+  * Waiting on Customer
+* SBR filtering (e.g., Messaging, RHOAI)
 
-Query: "Fetch details for case 04210225 and check if ENTMQBR-10429 is linked."
+---
 
-4. SBR & Status Filters
-Trigger Logic: search_cases with predefined SBR filters.
+### ⏱️ Logic 4: Chronological Priority
 
-Query: "Search for Messaging cases"
+* Server-side sorting by **lastModifiedDate**
+* Always shows **latest updates first**
 
-Query: "Show me active RHOAI issues"
+---
 
-5. General Conversation
-Trigger Logic: Direct LLM Fallback (No tools called).
+### 🔄 Logic 5: Hybrid Query Handling
 
-Query: "Hello, how can you help me today?"
+Handles:
 
-Query: "What are the supported Red Hat products?"
+* Case only
+* Jira only
+* Case + Jira
+* No Jira scenarios
+* General queries
 
-🛠️ Setup & Installation
-Clone the Repository:
+---
 
-Bash
+### 📊 Logic 6: Deterministic Rendering (NEW)
+
+* Clean **horizontal tables**
+* Consistent structure (no broken markdown)
+* Jira IDs rendered as **clickable links**
+
+Example:
+
+```
+| Jira | Status | Summary | Priority | Components | Versions |
+|------|--------|---------|----------|------------|----------|
+| CSB-7587 | In Progress | Add support... | Major | Camel | CSB-4.8.5 |
+```
+
+---
+
+### 🔗 Logic 7: Clickable Jira Links (NEW)
+
+* Jira IDs rendered as hyperlinks:
+
+```
+[CSB-7587](https://redhat.atlassian.net/browse/CSB-7587)
+```
+
+---
+
+### 💬 Logic 8: Engineering Insights (Jira Comment Summary) (NEW)
+
+* Extracts Jira comments from:
+
+  ```
+  fields.comment.comments[]
+  ```
+* Converts ADF → plain text
+* Displays **summarized insights**
+
+Example:
+
+```
+Engineering Insights:
+- Could somebody take a look at this.
+- Created external case link for 04379648.
+```
+
+---
+
+# 📂 Project Structure
+
+## 🌐 Frontend & Entry
+
+**app.py**
+
+* Flask web server
+* Manages chat sessions
+* Defines tool manifest
+
+---
+
+## 🧠 Orchestration (Core Logic)
+
+**agent.py**
+
+* Regex detection (Case ID / Jira ID)
+* Executes workflow:
+
+  * Case → Triple Scan
+  * Jira → Direct fetch
+* Builds:
+
+  * Jira tables
+  * Engineering insights
+* Handles tool responses + formatting
+
+---
+
+**llm.py**
+
+* Connects to LLM (Gemini or compatible)
+* Generates executive summaries
+
+---
+
+## 🛠️ Tooling Layer
+
+**salesforce_server.py** (MCP Server)
+
+* Fetches:
+
+  * Case details
+  * Case comments
+  * External trackers
+* Calls Jira REST API:
+
+  ```
+  GET /rest/api/3/issue/{jira_id}
+  ```
+* Extracts:
+
+  * Jira metadata
+  * Jira comments (ADF parsing)
+* Returns structured JSON:
+
+  ```json
+  {
+    "key": "CSB-7587",
+    "href": "https://redhat.atlassian.net/browse/CSB-7587",
+    "status": "...",
+    "summary": "...",
+    "recent_comments": [...]
+  }
+  ```
+
+---
+
+**tool_router.py**
+
+* Secure routing layer
+* Ensures only authorized tools are invoked
+
+---
+
+# 🔍 Query Patterns
+
+## 1. 📁 Salesforce Case Queries
+
+Trigger: Triple Scan
+
+Examples:
+
+* "Show status for case 04210225"
+* "What is the latest on 03991244?"
+
+---
+
+## 2. 🔗 Direct Jira Queries
+
+Trigger: `get_jira_details`
+
+Examples:
+
+* "Check ENTMQBR-10429"
+* "Get CEQ-12628 details"
+
+---
+
+## 3. 🔄 Hybrid Queries
+
+Trigger: Case + Jira enrichment
+
+Examples:
+
+* "Check case 04210225 and CSB-7587"
+
+---
+
+## 4. 📊 SBR Filtering
+
+Trigger: `search_cases`
+
+Examples:
+
+* "Show Messaging cases"
+* "List RHOAI issues"
+
+---
+
+## 5. 💬 General Queries
+
+Trigger: LLM only
+
+Examples:
+
+* "What products does Red Hat support?"
+
+---
+
+# 🛠️ Setup & Installation
+
+## 1. Clone Repo
+
+```bash
 git clone https://github.com/your-repo/ChatBot_MCP
 cd ChatBot_MCP
-Install Dependencies:
+```
 
-Bash
+---
+
+## 2. Install Dependencies
+
+```bash
 pip install -r requirements.txt
-Configure Environment Variables:
-Create a .env file:
+```
 
-Code snippet
+---
+
+## 3. Configure Environment Variables
+
+Create `.env`:
+
+```bash
 TOKEN=your_red_hat_api_token
-USER_KEY=your_gemini_api_key
-MODEL_API=your_llm_endpoint_url
+USER_KEY=your_llm_api_key
+MODEL_API=your_llm_endpoint
 EMAIL=your_redhat_email
-JIRA_TOKEN=your_jira_personal_access_token
-Run the Application:
+JIRA_TOKEN=your_jira_token
+```
 
-Bash
-# Terminal 1: Start the MCP Server
+---
+
+## 4. Run Application
+
+```bash
+# Terminal 1
 python salesforce_server.py
 
-# Terminal 2: Start the Web App
+# Terminal 2
 python app.py
-📖 Usage Examples
-Case Deep Dive: "What is the progress on Jira for case 04210225?" (Triggering the Deep Scan).
+```
 
-Active Monitoring: "Filter all Messaging cases" (Enforcing SBR and Waiting statuses).
+---
 
-Jira Check: "Summarize the engineering progress for ENTMQBR-10429."
+# 📖 Usage Examples
+
+### 🔍 Case Deep Dive
+
+```
+What is the progress on case 04206670?
+```
+
+---
+
+### 🔗 Jira Analysis
+
+```
+Summarize CEQ-12628
+```
+
+---
+
+### 🔄 Hybrid
+
+```
+Check case 04206670 and related Jira
+```
+
+---
+
+### 📊 Monitoring
+
+```
+Show Messaging cases
+```
+
+---
+
+# ⚙️ Technical Highlights
+
+### Jira API (GET Request)
+
+```bash
+curl -u "$EMAIL:$JIRA_TOKEN" \
+  -H "Accept: application/json" \
+  https://redhat.atlassian.net/rest/api/3/issue/CSB-7587
+```
+
+---
+
+### ADF Parsing
+
+* Converts Jira rich text → plain text
+* Handles:
+
+  * paragraphs
+  * mentions
+  * lists
+  * code blocks
+
+---
+
+### Robust Error Handling
+
+* Detects:
+
+  * Permission issues
+  * Empty responses
+  * Invalid Jira keys
+* Prevents broken UI rendering
+
+---
+
+# ✅ Summary
+
+This system provides:
+
+* End-to-end **case + Jira intelligence**
+* Clean, **deterministic UI output**
+* Real-time **engineering visibility**
+* Scalable MCP-based architecture
+
+---
+
+If you want next level upgrade, I can help you add:
+
+* 🔴 Priority highlighting (Critical / Major)
+* 📈 Case aging / SLA tracking
+* 🤖 Auto escalation detection
+* 📊 Dashboard UI (React / Streamlit)
+
+Just tell me 👍
+
