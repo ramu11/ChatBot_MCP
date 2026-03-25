@@ -1,132 +1,135 @@
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from llm import ask_llm
 from tools.tool_router import execute_tool
 
 def extract_jira_details(data_obj):
     """
-    ADVANCED JIRA DETECTOR: Captures structured metadata and performs 
-    a deep scan of private comments to fetch technical context for summarization.
+    Deep scans the entire object for Jira IDs and captures 300 chars of 
+    surrounding text for Executive Summary context.
     """
-    if not data_obj: 
-        return []
-    
+    if not data_obj: return []
     details = []
     jira_pattern = r'\b([A-Z]{2,10}-[0-9]+)\b'
     
-    # 1. SCAN STRUCTURED OBJECTS (Prioritizing Official Tracker Data)
-    items_to_scan = []
-    if isinstance(data_obj, list):
-        items_to_scan = data_obj
-    elif isinstance(data_obj, dict):
-        items_to_scan = data_obj.get("externalTrackers", []) or data_obj.get("bugzillas", [])
-        if not isinstance(items_to_scan, list): items_to_scan = [items_to_scan]
-
-    for item in items_to_scan:
-        if isinstance(item, dict):
-            jid = item.get("externalId") or item.get("id")
-            if jid and re.match(jira_pattern, str(jid)):
-                details.append({
-                    "id": jid,
-                    "markdown_link": f"[{jid}](https://issues.redhat.com/browse/{jid})",
-                    "summary": item.get("summary") or item.get("title") or "Engineering Tracker",
-                    "status": item.get("status") or item.get("statusName") or "Linked",
-                    "comment_context": "" # Placeholder for deep scan
-                })
-
-    # 2. DEEP SCAN RAW TEXT (Focusing on Private Comments/Notes)
+    # Convert object to string to scan everything at once
     raw_text = json.dumps(data_obj) if not isinstance(data_obj, str) else data_obj
     found_ids = set(re.findall(jira_pattern, raw_text))
-    
-    existing_lookup = {d["id"]: d for d in details}
 
     for jid in found_ids:
-        # Capture 500 chars to ensure the LLM sees the full technical update/comment
-        ctx_match = re.search(rf"(.{{0,500}}{jid}.{{0,500}})", raw_text, re.IGNORECASE | re.DOTALL)
+        # Capture context around the ID
+        ctx_match = re.search(rf"(.{{0,300}}{jid}.{{0,300}})", raw_text, re.IGNORECASE | re.DOTALL)
         clean_ctx = ctx_match.group(1).replace("\\n", " ").strip() if ctx_match else ""
         
-        if jid in existing_lookup:
-            # Add the comment data to the existing official tracker
-            existing_lookup[jid]["comment_context"] = clean_ctx
-        else:
-            # Found a new Jira ID mentioned only in comments
-            details.append({
-                "id": jid,
-                "markdown_link": f"[{jid}](https://issues.redhat.com/browse/{jid})",
-                "summary": "Mentioned in technical notes",
-                "status": "Detected",
-                "comment_context": clean_ctx
-            })
+        details.append({
+            "id": jid,
+            "markdown_link": f'<a href="https://issues.redhat.com/browse/{jid}">{jid}</a>',
+            "summary": "Engineering Tracker Found",
+            "status": "Detected",
+            "comment_context": clean_ctx
+        })
             
     return details
 
-def run_agent(messages, user_key, model_api, token):
-    """
-    The Orchestrator: Merges API data and instructs LLM to summarize private comments.
-    """
-    if not messages or messages[0].get("role") != "system":
-        messages.insert(0, {
-            "role": "system", 
-            "content": (
-                "You are a Red Hat Support Assistant. Summarize cases and engineering progress.\n"
-                "STRICT FORMATTING:\n"
-                "1. '## Case Summary': Use the case description.\n"
-                "2. '## Linked Jira Progress': Create a Markdown table with columns: "
-                "| Jira ID | Official Summary | Latest Progress (from Comments) | Status |.\n"
-                "3. In the 'Latest Progress' column, SUMMARIZE the technical details found in the "
-                "'comment_context' field of the jira_updates metadata. Focus on fix status, "
-                "root cause, or engineering blockers.\n"
-                "4. Use the 'markdown_link' for IDs.\n"
-                "5. If no Jiras exist, state 'No engineering trackers found.'"
-            )
-        })
-
-    last_msg = messages[-1]["content"]
-    id_match = re.search(r"(\d{8})", last_msg)
-    case_id = id_match.group(1) if id_match else None
-
-    if case_id:
+def fetch_jira_api_data(jira_list):
+    """Enriches IDs by calling get_jira_details tool."""
+    enriched_results = []
+    for jira in jira_list:
+        jid = jira.get("id")
         try:
-            print(f"[AGENT] Deep Scanning Case {case_id} for Comment Progress...")
+            jira_raw = execute_tool("get_jira_details", {"jira_id": jid})
+            api_data = json.loads(jira_raw) if isinstance(jira_raw, str) else jira_raw
             
-            # A. Fetch Primary Case
-            res = execute_tool("get_support_case", {"case_id": case_id})
-            tool_result = json.loads(res) if isinstance(res, str) else res
+            if api_data and "error" not in str(api_data):
+                jira.update({
+                    "status": api_data.get("status", jira.get("status")),
+                    "summary": api_data.get("summary", jira.get("summary")),
+                    "target_version": api_data.get("target_version", "None Set"),
+                    "api_comments": api_data.get("recent_comments", [])
+                })
+            else:
+                jira["status"] = "Access Restricted/Not Found"
+        except Exception:
+            jira["status"] = "Fetch Error"
+        
+        enriched_results.append(jira)
+    return enriched_results
 
-            if tool_result and "error" not in str(tool_result):
-                c_num = tool_result.get("caseNumber") or case_id
+def run_agent(messages, user_key, model_api, token):
+    # 1. THE RIGID TEMPLATE
+    system_instr = (
+        "You are a Red Hat Support Assistant. If 'DATA_FOUND' is present, you MUST "
+        "ignore your standard training and use this EXACT Markdown format:\n\n"
+        "## Executive Summary\n"
+        "(Write a high-level technical paragraph here based on the description and comments)\n\n"
+        "## Engineering Progress (Jira)\n"
+        "| Key | Status | Summary | Target Version |\n"
+        "| :--- | :--- | :--- | :--- |\n"
+        "(Fill this table using jira_updates. Use the 'markdown_link' field for the Key column)\n\n"
+        "### 💬 Recent Engineering Comments\n"
+        "(List exactly the comments from recent_comments as 'Author: Comment')\n\n"
+        "STRICT RULE: Do not include 'Subject', 'Status', or 'Severity' lists at the top. "
+        "Do not stop until the table is complete."
+    )
+
+    if not messages or (isinstance(messages, list) and messages[0].get("role") != "system"):
+        messages.insert(0, {"role": "system", "content": system_instr})
+
+    query = messages[-1]["content"]
+    case_match = re.search(r"\b(\d{8})\b", query)
+    jira_match = re.search(r"\b([A-Z]{2,10}-[0-9]+)\b", query)
+    final_data = {}
+
+    try:
+        if case_match:
+            case_id = case_match.group(1)
+            print(f"[AGENT] Fetching Case: {case_id}")
+            
+            case_res = execute_tool("get_support_case", {"case_id": case_id})
+            case_info = json.loads(case_res) if isinstance(case_res, str) else case_res
+            
+            if case_info and isinstance(case_info, dict) and "error" not in case_info:
+                # Truncate long descriptions to keep the LLM focused
+                if "description" in case_info:
+                    case_info["description"] = case_info["description"][:1200] + "..."
                 
-                # B. Fetch Supplemental Data
-                comments_raw = execute_tool("list_case_comments", {"case_number": c_num})
-                trackers_raw = execute_tool("get_external_updates", {"case_number": c_num})
+                final_data = case_info 
+                c_num = case_info.get("caseNumber") or case_id
                 
-                comments = json.loads(comments_raw) if isinstance(comments_raw, str) else (comments_raw or [])
-                trackers = json.loads(trackers_raw) if isinstance(trackers_raw, str) else (trackers_raw or [])
+                # Fetch Supplemental Data
+                try:
+                    comments = json.loads(execute_tool("list_case_comments", {"case_number": c_num}))
+                    trackers = json.loads(execute_tool("get_external_updates", {"case_number": c_num}))
+                except:
+                    comments, trackers = [], []
 
-                # C. Extract and cross-reference details
-                all_found = extract_jira_details(tool_result) + \
-                            extract_jira_details(comments) + \
-                            extract_jira_details(trackers)
+                # Find Jiras and get live API data
+                jiras_found = extract_jira_details([case_info, comments, trackers])
+                unique_jiras = {j["id"]: j for j in jiras_found}
                 
-                # D. Merge and De-duplicate by ID (preserving comment context)
-                unique_jiras = {}
-                for entry in all_found:
-                    jid = entry["id"]
-                    if jid not in unique_jiras:
-                        unique_jiras[jid] = entry
-                    elif entry["comment_context"]: # Prefer the entry that has comment data
-                        unique_jiras[jid]["comment_context"] = entry["comment_context"]
-                
-                tool_result["jira_updates"] = list(unique_jiras.values())
-                tool_result["recent_technical_notes"] = (comments if isinstance(comments, list) else [])[:5]
+                final_data["recent_comments"] = (comments if isinstance(comments, list) else [])[:5]
+                final_data["jira_updates"] = fetch_jira_api_data(list(unique_jiras.values()))
+            else:
+                return f"### ⚠️ Salesforce Error\nCould not find Case {case_id}."
 
-            messages.append({"role": "user", "content": f"TOOL_DATA: {json.dumps(tool_result)}"})
+        elif jira_match:
+            jid = jira_match.group(1)
+            placeholder = [{"id": jid, "markdown_link": f"[{jid}](https://issues.redhat.com/browse/{jid})"}]
+            final_data["jira_updates"] = fetch_jira_api_data(placeholder)
 
-        except Exception as e:
-            print(f"[AGENT] Error: {str(e)}")
-            messages.append({"role": "user", "content": f"Technical Error: {str(e)}"})
+        # 2. THE FINAL HANDOFF
+        if final_data:
+            messages.append({
+                "role": "system", 
+                "content": f"DATA_FOUND: {json.dumps(final_data)}"
+            })
+            messages.append({
+                "role": "user", 
+                "content": "Generate the Executive Summary and Engineering Table now."
+            })
 
-    # 4. Final LLM Response
-    response = ask_llm(messages, user_key, model_api)
-    return response["choices"][0]["message"].get("content")
+    except Exception as e:
+        return f"Agent Error: {str(e)}"
+
+    return ask_llm(messages, user_key, model_api)["choices"][0]["message"].get("content")

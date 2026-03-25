@@ -16,20 +16,22 @@ def execute_tool(tool_name, args):
         "get_account",         # Account/Customer Details
         "get_opportunities",   # Sales/Opportunity context
         "list_case_comments",  # Authorized for Deep Scan (Technical Notes)
-        "get_external_updates" # Authorized for Deep Scan (Jira/Bugzilla Trackers)
+        "get_external_updates",# Authorized for Deep Scan (Jira/Bugzilla Trackers)
+        "get_jira_details"     # NEW: Direct Engineering Access (Real-time Status/Comments)
     ]
 
     # 1. Security Check
     if tool_name not in allowed_tools:
         error_msg = f"Security Violation: Unauthorized tool call attempted: {tool_name}"
         sys.stderr.write(f"[Router] {error_msg}\n")
+        # Return empty list string to prevent agent.py from breaking during iteration
         return "[]"
 
     # 2. Execution Bridge
     try:
         sys.stderr.write(f"[Router] Calling authorized tool: {tool_name}\n")
         
-        # Pass the request to the MCP Client
+        # Pass the request to the MCP Client (stdio/SSE bridge)
         result = call_tool(tool_name, args)
         
         # 3. Defensive Result Handling
