@@ -1,31 +1,57 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Gemini Chatbot</title>
+<title>RedHat GSS Chatbot</title>
+
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
 <style>
-body {
+
+/* -----------------------------
+   GLOBAL LAYOUT (FULL SCREEN)
+----------------------------- */
+html, body {
+  height: 100%;
+  margin: 0;
   font-family: Arial;
   background: #f5f5f5;
 }
 
+/* Main container */
 #chatbox {
-  width: 600px;
-  margin: 40px auto;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;     /* FULL SCREEN */
+  width: 100%;
   background: white;
-  border: 1px solid #ddd;
-  padding: 20px;
 }
 
+/* Header */
+h2 {
+  margin: 0;
+  padding: 15px;
+  border-bottom: 1px solid #ddd;
+  background: #fff;
+}
+
+/* Messages area */
 #messages {
-  height: 400px;
+  flex: 1;
   overflow-y: auto;
-  border: 1px solid #ddd;
-  padding: 10px;
+  padding: 15px;
+  background: #fafafa;
 }
 
+/* Optional: keep readable width on large screens */
+#messages-content {
+  max-width: 1000px;
+  margin: auto;
+}
+
+/* Message styling */
 .message {
   margin: 10px 0;
+  line-height: 1.5;
 }
 
 .user {
@@ -36,14 +62,36 @@ body {
   color: #333;
 }
 
-input {
-  width: 80%;
+.loading {
+  color: gray;
+  font-style: italic;
+}
+
+/* Input bar at bottom */
+#input-area {
+  display: flex;
   padding: 10px;
+  border-top: 1px solid #ddd;
+  background: #fff;
+}
+
+#input {
+  flex: 1;
+  padding: 10px;
+  font-size: 14px;
 }
 
 button {
-  padding: 10px;
+  padding: 10px 15px;
+  margin-left: 10px;
+  cursor: pointer;
 }
+
+button:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
 </style>
 </head>
 
@@ -51,21 +99,39 @@ button {
 
 <div id="chatbox">
 
-<h2>Gemini Chatbot</h2>
+<h2>RedHat GSS Chatbot</h2>
 
-<div id="messages"></div>
+<div id="messages">
+  <div id="messages-content"></div>
+</div>
 
-<input id="input" placeholder="Ask something..." />
-<button onclick="sendMessage()">Send</button>
+<div id="input-area">
+  <input id="input" placeholder="Ask something..." />
+  <button id="sendBtn" onclick="sendMessage()">Send</button>
+</div>
 
 </div>
 
 <script>
 
+// -----------------------------------------------------
+// ENTER KEY SUPPORT
+// -----------------------------------------------------
+document.getElementById("input").addEventListener("keypress", function (e) {
+    if (e.key === "Enter") {
+        sendMessage();
+    }
+});
+
+// -----------------------------------------------------
+// MAIN SEND FUNCTION
+// -----------------------------------------------------
 async function sendMessage() {
 
     let input = document.getElementById("input");
-    let text = input.value;
+    let button = document.getElementById("sendBtn");
+
+    let text = input.value.trim();
 
     if (!text) return;
 
@@ -73,31 +139,73 @@ async function sendMessage() {
 
     input.value = "";
 
-    const response = await fetch("/chat", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({message: text})
-    });
+    // Disable UI while processing
+    button.disabled = true;
 
-    const data = await response.json();
+    let loadingMsg = addMessage("Bot", "Thinking...", "loading");
 
-    addMessage("Bot", data.reply, "bot");
+    try {
+        const response = await fetch("/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ message: text })
+        });
+
+        if (!response.ok) {
+            throw new Error("Server error: " + response.status);
+        }
+
+        const data = await response.json();
+
+        removeMessage(loadingMsg);
+
+        addMessage("Bot", data.reply || "No response received.", "bot");
+
+    } catch (error) {
+
+        removeMessage(loadingMsg);
+
+        addMessage(
+            "Bot",
+            " Error: Unable to fetch response. " + error.message,
+            "bot"
+        );
+    }
+
+    button.disabled = false;
 }
 
+// -----------------------------------------------------
+// ADD MESSAGE
+// -----------------------------------------------------
 function addMessage(sender, text, cls) {
 
-    let messages = document.getElementById("messages");
+    let container = document.getElementById("messages-content");
 
     let div = document.createElement("div");
     div.className = "message " + cls;
 
-    div.innerHTML = "<b>" + sender + ":</b> " + marked.parse(text);
+    let safeHtml = marked.parse(text || "");
 
-    messages.appendChild(div);
+    div.innerHTML = "<b>" + sender + ":</b> " + safeHtml;
 
+    container.appendChild(div);
+
+    let messages = document.getElementById("messages");
     messages.scrollTop = messages.scrollHeight;
+
+    return div;
+}
+
+// -----------------------------------------------------
+// REMOVE MESSAGE (used for loading)
+// -----------------------------------------------------
+function removeMessage(element) {
+    if (element && element.parentNode) {
+        element.parentNode.removeChild(element);
+    }
 }
 
 </script>

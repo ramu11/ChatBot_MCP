@@ -90,7 +90,7 @@ def chat():
 
     return jsonify({"reply": answer})
 
-@app.route("/reset", methods=["POST"])
+@app.route("/reset", methods=["GET", "POST"])
 def reset():
     """Utility to clear chat history without restarting server."""
     global messages

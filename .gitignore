@@ -1,0 +1,14 @@
+# Python bytecode and caches
+**/__pycache__/
+*.pyc
+
+# RAG Data Ingestion Artifacts
+rag/processed_markdown/
+rag/chunks/
+rag/metadata/
+
+# Local Vector Database Assets
+rag/vector_store/
+
+# Raw documentation input binaries
+rag/raw_pdfs/
