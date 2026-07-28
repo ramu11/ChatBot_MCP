@@ -1,4 +1,23 @@
-# mcp_client.py — MCP client for LOCAL servers only (Salesforce)
+"""
+mcp_client.py
+
+MCP (Model Context Protocol) client for communicating with local MCP servers.
+
+Responsibilities:
+- Maintains the mapping between MCP tool names and their corresponding local
+  server implementations.
+- Establishes stdio-based connections to local MCP servers.
+- Executes MCP tool requests through a ClientSession.
+- Extracts and normalizes MCP responses into a consistent format.
+- Provides a synchronous wrapper (`call_tool`) for use by the agent while
+  internally managing asynchronous MCP communication.
+- Handles connection failures and runtime exceptions gracefully to prevent
+  external tool failures from interrupting agent execution.
+
+This module abstracts all MCP communication details, allowing the rest of the
+application to invoke tools without needing to understand the MCP protocol,
+server lifecycle, or transport mechanism.
+"""
 
 import asyncio
 import os
@@ -19,6 +38,7 @@ from mcp import ClientSession
 SERVER_MAP = {
     "get_support_case": "mcp_servers/salesforce_server.py",
     "search_cases": "mcp_servers/salesforce_server.py",
+    "search_historical_cases": "mcp_servers/salesforce_server.py",
     "list_case_comments": "mcp_servers/salesforce_server.py",
     "get_external_updates": "mcp_servers/salesforce_server.py"
 }

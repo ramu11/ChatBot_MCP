@@ -1,4 +1,21 @@
-# tool_router.py — Security gatekeeper + smart router (MCP + Jira REST)
+"""
+tool_router.py
+
+Central tool execution router and security gatekeeper for the AI Support Agent.
+
+Responsibilities:
+- Enforces a whitelist of authorized tools to prevent arbitrary or prompt-injected tool execution.
+- Routes tool requests to the appropriate backend:
+    * Salesforce tools via the MCP client.
+    * Jira tools via direct REST API integration.
+- Provides a single entry point (`execute_tool`) for all external tool invocations.
+- Normalizes tool responses to a consistent JSON string format for downstream processing by the agent.
+- Handles execution errors gracefully to ensure tool failures do not terminate the AI agent.
+
+This module abstracts the underlying implementation of each backend, allowing
+the agent to invoke tools without needing to know whether the request is served
+through MCP or a direct REST API.
+"""
 
 from tools.mcp_client import call_tool
 from tools.jira_adapter import (
@@ -33,6 +50,7 @@ def execute_tool(tool_name, args):
         # 🔹 Salesforce (via MCP)
         "get_support_case",
         "search_cases",
+        "search_historical_cases",   # NEW
         "list_case_comments",
 
         # 🔹 Jira (via REST - NEW)

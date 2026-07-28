@@ -1,101 +1,91 @@
 import os
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session
+from flask_session import Session
 from agent import run_agent
 
 app = Flask(__name__)
+
+# SECURITY REQUIREMENT: Flask sessions require a secret key
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-dev-key-change-this")
+
+# Configure Server-Side Session Storage BEFORE initializing
+app.config["SESSION_TYPE"] = "filesystem"
+app.config["SESSION_PERMANENT"] = False
+
+# Initialize Flask-Session with capital 'S'
+Session(app)
 
 # Environment Variables
 USER_KEY = os.getenv("USER_KEY")
 MODEL_API = os.getenv("MODEL_API")
 TOKEN = os.getenv("TOKEN")
 
-# Global message history for the session
-messages = []
 
-# IMPROVISED Tool definitions: Refined to match your "No Closed Cases" & "Jira Focus" rules
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_support_case",
-            "description": (
-                "DEEP SCAN: Use this for specific 8-digit Case IDs. "
-                "Retrieves case details PLUS technical comments and Jira tracker updates "
-                "to provide Status, Target Release, and Progress summaries."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "case_id": {"type": "string", "pattern": "^\\d{8}$"}
-                },
-                "required": ["case_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_cases",
-            "description": (
-                "FILTER SEARCH: Finds active cases (Waiting on Red Hat/Customer/Engineering). "
-                "Results are automatically sorted with the LATEST modified cases at the top."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {"type": "string", "description": "Search term or SBR name."},
-                    "sbrs": {
-                        "type": "array",
-                        "items": {
-                            "type": "string", 
-                            "enum": [
-                                "Ansible", "API Mgmt", "Business Rule Frameworks", "FuseSource", 
-                                "Identity Management", "JBoss Base AS", "JBoss Clustering", 
-                                "JBoss Security", "JVM & Diagnostics", "Messaging", "Networking", 
-                                "RHOAI", "Security Vulnerabilities", "Services", "Shift", "Webservers"
-                            ]
-                        }
-                    },
-                    "maxResults": {"type": "integer", "default": 20}
-                },
-                "required": ["keyword"]
-            }
-        }
-    }
-]
+# -----------------------------
+# GUARDRAIL: INGRESS VERIFICATION
+# -----------------------------
+def validate_gateway_request(text: str) -> bool:
+    """
+    Validates general text size bounds at the edge gateway to prevent DoS attempts.
+    """
+    if not text or len(text.strip()) > 3000:
+        return False
+    return True
+
 
 @app.route("/")
 def home():
     return render_template("chat.html")
 
+
 @app.route("/chat", methods=["POST"])
 def chat():
-    data = request.json
-    user_msg = data.get("message")
-    
+    data = request.json or {}
+    user_msg = data.get("message", "").strip()
+
+    # GUARDRAIL: Ingress Edge Filtering
     if not user_msg:
         return jsonify({"reply": "No message received."}), 400
 
-    # 1. Update session history
-    messages.append({"role": "user", "content": user_msg})
+    if not validate_gateway_request(user_msg):
+        return (
+            jsonify(
+                {
+                    "reply": "Security Error: Input exceeds maximum acceptable length constraints."
+                }
+            ),
+            400,
+        )
 
-    # 2. Call Agent (Internal logic handles tool selection and deep scanning)
+    # GUARDRAIL & RESTORED FUNCTIONALITY:
+    # Read the isolated history for THIS specific user session. Initialize if empty.
+    if "history" not in session:
+        session["history"] = []
+
+    session_history = session["history"]
+    session_history.append({"role": "user", "content": user_msg})
+
     try:
-        answer = run_agent(messages, USER_KEY, MODEL_API, TOKEN)
+        # Run the agent with the user's continuous chat history matrix
+        answer = run_agent(session_history, USER_KEY, MODEL_API, TOKEN)
     except Exception as e:
         answer = f"Agent Error: {str(e)}"
 
-    # 3. Store response
-    messages.append({"role": "assistant", "content": answer})
+    # Append assistant reply to this specific user's session state
+    session_history.append({"role": "assistant", "content": answer})
+
+    # To keep token sizes under control over long chats, keep only the last 15 messages
+    session["history"] = session_history[-15:]
 
     return jsonify({"reply": answer})
 
+
 @app.route("/reset", methods=["GET", "POST"])
 def reset():
-    """Utility to clear chat history without restarting server."""
-    global messages
-    messages = []
-    return jsonify({"status": "History cleared"})
+    """Clears the chat history only for the user making the request."""
+    session.pop("history", None)
+    return jsonify({"status": "Your session context has been cleared."})
+
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
