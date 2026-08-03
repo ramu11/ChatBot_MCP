@@ -1,113 +1,108 @@
+# tools/tool_router.py
 """
-tool_router.py
+Central Tool Router and Security Gatekeeper for Red Hat Support AI Agent.
 
-Central tool execution router and security gatekeeper for the AI Support Agent.
-
-Responsibilities:
-- Enforces a whitelist of authorized tools to prevent arbitrary or prompt-injected tool execution.
-- Routes tool requests to the appropriate backend:
-    * Salesforce tools via the MCP client.
-    * Jira tools via direct REST API integration.
-- Provides a single entry point (`execute_tool`) for all external tool invocations.
-- Normalizes tool responses to a consistent JSON string format for downstream processing by the agent.
-- Handles execution errors gracefully to ensure tool failures do not terminate the AI agent.
-
-This module abstracts the underlying implementation of each backend, allowing
-the agent to invoke tools without needing to know whether the request is served
-through MCP or a direct REST API.
+This module acts as the unified execution entry point for all external tool calls.
+It enforces a strict whitelist to block unauthorized execution or prompt injection,
+routes traffic between direct REST APIs (Jira) and MCP protocols (Salesforce),
+normalizes outputs to consistent JSON string formats, and provides defensive error catching.
 """
 
-from tools.mcp_client import call_tool
+import json
+import sys
+from typing import Any, Dict, Union
+
 from tools.jira_adapter import (
+    get_comments,
     get_issue,
     search_issues,
-    get_comments
 )
-
-import sys
-import json
+from tools.mcp_client import call_tool
 
 
-def execute_tool(tool_name, args):
+def execute_tool(tool_name: str, args: Dict[str, Any]) -> str:
     """
-    Central routing layer for all tool execution.
+    Central security router and dispatcher for external agent tool execution.
 
-    Responsibilities:
-    1. Enforce tool whitelist (security)
-    2. Route to correct backend:
-        - MCP (Salesforce)
-        - Direct REST (Jira)
-    3. Ensure safe execution (no crashes)
-    4. Normalize output format (always JSON string)
+    Workflow:
+        1. Validates `tool_name` against the allowed tool whitelist.
+        2. Routes Jira execution to direct REST endpoints (bypassing MCP).
+        3. Routes Salesforce execution through the MCP client layer.
+        4. Normalizes all tool outputs into valid JSON strings.
+        5. Catches and logs all execution exceptions to protect agent uptime.
+
+    Args:
+        tool_name (str): The identifier string of the tool requested for execution.
+        args (Dict[str, Any]): Dictionary of arguments passed to the specific tool function.
+
+    Returns:
+        str: JSON-formatted string representation of the tool execution result,
+             or JSON error message string on failure/unauthorized calls.
     """
-
     # ---------------------------------------------------
     # AUTHORIZED TOOL WHITELIST
     # ---------------------------------------------------
-    # Only tools listed here are allowed to execute.
-    # Prevents prompt injection / arbitrary tool execution.
+    # Strictly enforce allowed tools to prevent arbitrary execution or prompt injection attacks
     allowed_tools = [
-        # 🔹 Salesforce (via MCP)
+        # Salesforce Tools (via MCP backend)
         "get_support_case",
         "search_cases",
-        "search_historical_cases",   # NEW
+        "search_historical_cases",
         "list_case_comments",
-
-        # 🔹 Jira (via REST - NEW)
+        # Jira Tools (via direct REST API)
         "jira.get_issue",
         "jira.search",
-        "jira.get_comments"
+        "jira.get_comments",
     ]
 
     # ---------------------------------------------------
-    # SECURITY CHECK
+    # SECURITY GATEKEEPER CHECK
     # ---------------------------------------------------
     if tool_name not in allowed_tools:
-        error_msg = (
-            "Security Violation: "
-            f"Unauthorized tool call attempted: {tool_name}"
-        )
-
+        error_msg = f"Security Violation: Unauthorized tool call attempted: {tool_name}"
         sys.stderr.write(f"[Router] {error_msg}\n")
-        return "[]"
+        return json.dumps({"error": error_msg})
 
     try:
-        sys.stderr.write(
-            f"[Router] Routing tool: {tool_name}\n"
-        )
+        sys.stderr.write(f"[Router] Routing tool: {tool_name}\n")
 
         # ---------------------------------------------------
-        # 🔹 JIRA ROUTING (BYPASS MCP)
+        # PATH 1: DIRECT JIRA REST ROUTING
         # ---------------------------------------------------
-        # Jira does NOT go through MCP because:
-        # - MCP auth (OAuth) is not usable in backend
-        # - REST API is stable and working
+        # Jira bypasses MCP due to OAuth header constraints in serverless/backend contexts
         if tool_name == "jira.get_issue":
-            result = get_issue(args["issue_key"])
+            issue_key = args.get("issue_key")
+            if not issue_key:
+                return json.dumps({"error": "Missing required argument: 'issue_key'"})
+            result = get_issue(issue_key)
 
         elif tool_name == "jira.search":
-            result = search_issues(args["jql"])
+            jql = args.get("jql")
+            if not jql:
+                return json.dumps({"error": "Missing required argument: 'jql'"})
+            result = search_issues(jql, max_results=args.get("max_results", 5))
 
         elif tool_name == "jira.get_comments":
-            result = get_comments(args["issue_key"])
+            issue_key = args.get("issue_key")
+            if not issue_key:
+                return json.dumps({"error": "Missing required argument: 'issue_key'"})
+            result = get_comments(issue_key)
 
         # ---------------------------------------------------
-        # 🔹 DEFAULT: MCP ROUTING (Salesforce etc.)
+        # PATH 2: MCP ROUTING (Salesforce / MCP Tools)
         # ---------------------------------------------------
         else:
             result = call_tool(tool_name, args)
 
         # ---------------------------------------------------
-        # DEFENSIVE RESULT HANDLING
+        # DEFENSIVE RESULT NORMALIZATION
         # ---------------------------------------------------
-        # Prevent empty or null responses from breaking LLM flow
+        # Prevent null or empty string responses from disrupting downstream LLM parser
         if result is None or result == "":
-            sys.stderr.write(
-                f"[Router] Warning: {tool_name} returned empty result.\n"
-            )
+            sys.stderr.write(f"[Router] Warning: {tool_name} returned empty result.\n")
             return "[]"
 
-        # Ensure output is always JSON string
+        # Ensure output return format is always a valid JSON string
         if not isinstance(result, str):
             return json.dumps(result)
 
@@ -115,11 +110,9 @@ def execute_tool(tool_name, args):
 
     except Exception as e:
         # ---------------------------------------------------
-        # FAIL-SAFE: NEVER CRASH THE AGENT
+        # CRITICAL FAIL-SAFE
         # ---------------------------------------------------
-        sys.stderr.write(
-            f"[Router] Critical Error executing "
-            f"{tool_name}: {str(e)}\n"
-        )
-
-        return "[]"
+        # Log error to stderr and return structured error JSON so agent can adjust instead of retrying
+        error_payload = {"error": f"Critical Error executing {tool_name}: {str(e)}"}
+        sys.stderr.write(f"[Router] {error_payload['error']}\n")
+        return json.dumps(error_payload)

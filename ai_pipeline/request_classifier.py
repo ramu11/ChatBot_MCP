@@ -1,20 +1,22 @@
+# ai_pipeline/request_classifier.py
 """
-request_classifier.py
+Request Classifier Module for Red Hat Support AI Assistant.
 
-Determines the routing workflow for incoming user requests.
+This module determines the primary intent and routing workflow for incoming user queries.
+It enforces a deterministic routing priority pipeline:
 
-Routing priority:
-
-1. Salesforce Case Lookup
-2. Jira Lookup
-3. Product Detection
-4. Investigation Keyword Detection
-5. LLM Intent Routing
+Routing Priority:
+    1. Salesforce Case Lookup (8-digit ID check)
+    2. Jira Issue Lookup (Project key + number check)
+    3. Product Detection (Catalog term matching)
+    4. Investigation Keyword Detection (Deterministic term check)
+    5. LLM Fallback Routing (General vs. Investigation classification)
 """
 
+import json
 import os
 import re
-import json
+from typing import Dict, Any, Optional
 
 from llm import ask_llm
 from ai_pipeline.keywords import (
@@ -23,7 +25,9 @@ from ai_pipeline.keywords import (
     FAILURE_KEYWORDS,
 )
 
-# Environment Variables
+# ---------------------------------------------------------------------
+# ENVIRONMENT CONFIGURATION
+# ---------------------------------------------------------------------
 USER_KEY = os.getenv("USER_KEY")
 MODEL_API = os.getenv("MODEL_API")
 TOKEN = os.getenv("TOKEN")
@@ -33,7 +37,6 @@ MODEL_ID = os.getenv("MODEL_ID")
 # ---------------------------------------------------------------------
 # LLM ROUTER PROMPT
 # ---------------------------------------------------------------------
-
 CLASSIFIER_PROMPT = """
 You are a routing component inside a Red Hat Support AI Assistant.
 
@@ -70,110 +73,122 @@ Do not output anything else.
 
 
 # ---------------------------------------------------------------------
-# HELPERS
+# HELPER FUNCTIONS
 # ---------------------------------------------------------------------
 
 
-def detect_product(query: str):
+def detect_product(query: str) -> Optional[str]:
     """
-    Detect the Red Hat product mentioned in the user query.
+    Detects known Red Hat products mentioned in the incoming user query.
 
-    Matching strategy
-    -----------------
-    1. Case-insensitive matching.
-    2. Normalize whitespace.
-    3. Match longer phrases before shorter keywords.
-    4. Use whole-word matching for single-word keywords.
-    5. Return the first matching product.
+    Matching Strategy:
+        1. Case-insensitive normalization.
+        2. Clean and normalize extra whitespace.
+        3. Prioritize matching longer phrases before shorter keywords.
+        4. Apply word-boundary checks for single-word keywords to avoid partial matches.
+        5. Return the first matching product identifier.
 
     Args:
-        query (str):
-            User query.
+        query (str): Raw user query string.
 
     Returns:
-        str | None:
-            Product identifier if detected, otherwise None.
+        Optional[str]: Detected product key string from catalog, or None if no match.
     """
-
+    # Normalize query string spacing and lowercase
     q = " ".join(query.lower().split())
 
+    # Iterate through catalog products and match keywords sorted by length (descending)
     for product, metadata in PRODUCT_CATALOG.items():
-
         keywords = metadata.get("keywords", [])
 
+        # Sort keywords long-to-short so longer exact phrases match first
         for keyword in sorted(keywords, key=len, reverse=True):
-
             keyword = keyword.lower().strip()
 
-            # Multi-word phrase
+            # Multi-word phrase matching (e.g., "openshift container platform")
             if " " in keyword:
                 if keyword in q:
                     return product
 
-            # Whole-word keyword
+            # Whole-word exact keyword matching (e.g., "rhel")
             elif re.search(rf"\b{re.escape(keyword)}\b", q):
                 return product
 
     return None
 
 
-def is_investigation(query: str) -> bool:
+def is_investigation(query: str, product: Optional[str] = None) -> bool:
     """
-    Determine whether the request is an investigation request using
-    deterministic keyword matching across both investigation and failure terms.
+    Evaluates if a query represents a troubleshooting or incident analysis request.
+
+    Uses deterministic rule-based keyword matching across explicit investigation
+    phrases, failure indicator terms, and combined product-failure rules.
+
+    Args:
+        query (str): Raw user query string.
+        product (Optional[str]): Detected product key, if any.
+
+    Returns:
+        bool: True if investigation or failure indicators exist, False otherwise.
     """
     q = query.lower()
 
-    # Check for explicit investigation phrases
-    if any(keyword in q for keyword in INVESTIGATION_KEYWORDS):
+    # Step 1: Check for explicit investigation phrases (e.g., "known issue", "list cases")
+    for keyword in INVESTIGATION_KEYWORDS:
+        pattern = rf"\b{re.escape(keyword.lower())}\b"
+        if re.search(pattern, q):
+            return True
+
+    # Step 2: Check for failure / error / crash whole-word indicators
+    has_failure_kw = any(
+        re.search(rf"\b{re.escape(kw.lower())}\b", q) for kw in FAILURE_KEYWORDS
+    )
+    if has_failure_kw:
         return True
 
-    # Check for general failure / troubleshooting indicators
-    if any(re.search(rf"\b{re.escape(kw)}\b", q) for kw in FAILURE_KEYWORDS):
+    # Step 3: Dynamic Rule - If both a Product AND Failure Keyword exist
+    if product and has_failure_kw:
         return True
 
     return False
 
 
 # ---------------------------------------------------------------------
-# REQUEST CLASSIFICATION
+# MAIN REQUEST CLASSIFIER
 # ---------------------------------------------------------------------
 
 
-def classify_request(query: str, user_key: str, model_api: str) -> dict:
+def classify_request(query: str, user_key: str, model_api: str) -> Dict[str, Any]:
     """
-    Classify the incoming request.
+    Executes the full classification pipeline to determine request routing.
 
-    Routing priority
+    Pipeline Steps:
+        1. Check for 8-digit Salesforce Case numbers.
+        2. Check for standard Jira ticket identifiers.
+        3. Scan for Red Hat product names.
+        4. Detect investigation/failure keywords using `is_investigation`.
+        5. Fallback to LLM zero-shot classification if deterministic steps pass.
 
-    1. Salesforce Case Number
-    2. Jira Issue
-    3. Product Detection
-    4. Investigation Keyword Detection
-    5. LLM Classification (fallback only)
+    Args:
+        query (str): The raw text query submitted by the user.
+        user_key (str): Authentication key passed to LLM client.
+        model_api (str): Target API endpoint URL for LLM call.
 
     Returns:
-
-    {
-        "mode": "...",
-        "product": "...",
-        "confidence": 1.0,
-        "identifier": "..."
-    }
+        Dict[str, Any]: Dictionary containing classification results:
+            - "mode": "case_lookup" | "jira_lookup" | "investigation" | "general"
+            - "product": Detected product string or None
+            - "confidence": Confidence score float (0.0 to 1.0)
+            - "identifier": Case or Jira ID string (if applicable)
     """
-
     query = query.strip()
 
     # --------------------------------------------------------------
-    # 1. Salesforce Case
+    # Priority 1: Salesforce Case Lookup (8-digit numerical ID)
     # --------------------------------------------------------------
-
     case_match = re.search(r"\b(\d{8})\b", query)
-
     if case_match:
-
         print(f"[CLASSIFIER] Salesforce case detected: {case_match.group(1)}")
-
         return {
             "mode": "case_lookup",
             "product": None,
@@ -182,15 +197,11 @@ def classify_request(query: str, user_key: str, model_api: str) -> dict:
         }
 
     # --------------------------------------------------------------
-    # 2. Jira Issue
+    # Priority 2: Jira Issue Lookup (Project Key + Number format)
     # --------------------------------------------------------------
-
     jira_match = re.search(r"\b([A-Z]{2,10}-[0-9]+)\b", query)
-
     if jira_match:
-
         print(f"[CLASSIFIER] Jira issue detected: {jira_match.group(1).upper()}")
-
         return {
             "mode": "jira_lookup",
             "product": None,
@@ -199,22 +210,17 @@ def classify_request(query: str, user_key: str, model_api: str) -> dict:
         }
 
     # --------------------------------------------------------------
-    # 3. Product Detection
+    # Priority 3: Product Detection
     # --------------------------------------------------------------
-
     product = detect_product(query)
-
     if product:
         print(f"[CLASSIFIER] Product detected: {product}")
 
     # --------------------------------------------------------------
-    # 4. Investigation Keyword Detection
+    # Priority 4: Deterministic Investigation Keyword Detection
     # --------------------------------------------------------------
-
-    if is_investigation(query):
-
+    if is_investigation(query, product=product):
         print("[CLASSIFIER] Investigation detected using keyword rules.")
-
         return {
             "mode": "investigation",
             "product": product,
@@ -222,9 +228,8 @@ def classify_request(query: str, user_key: str, model_api: str) -> dict:
         }
 
     # --------------------------------------------------------------
-    # 5. LLM Fallback
+    # Priority 5: LLM Fallback Classification
     # --------------------------------------------------------------
-
     messages = [
         {
             "role": "system",
@@ -237,7 +242,6 @@ def classify_request(query: str, user_key: str, model_api: str) -> dict:
     ]
 
     try:
-
         response = ask_llm(
             messages,
             user_key,
@@ -248,17 +252,18 @@ def classify_request(query: str, user_key: str, model_api: str) -> dict:
             max_tokens=512,
         )
 
-        # Defensive content extraction to prevent KeyError on empty/missing content
+        # Defensive payload extraction to prevent KeyError on empty response choices
         choices = response.get("choices", [])
         if not choices:
             raise KeyError("Response choices empty")
 
         message = choices[0].get("message", {})
-        raw_content = message.get("content")
+        raw_content = message.get("content", "")
 
-        if not raw_content:
+        # Check for technical alerts/network error messages returned by llm.py
+        if "Technical Alert:" in raw_content or not raw_content:
             print(
-                "[CLASSIFIER WARNING] LLM returned empty content. Falling back to default."
+                "[CLASSIFIER WARNING] LLM gateway returned alert or empty response. Defaulting to 'general'."
             )
             mode = "GENERAL"
         else:
@@ -267,14 +272,14 @@ def classify_request(query: str, user_key: str, model_api: str) -> dict:
         print(f"[CLASSIFIER] LLM Output: {mode}")
 
         return {
-            "mode": "investigation" if mode == "INVESTIGATION" else "general",
+            "mode": "investigation" if "INVESTIGATION" in mode else "general",
             "product": product,
-            "confidence": 0.95,
+            "confidence": 0.95 if "Technical Alert:" not in raw_content else 0.50,
         }
 
     except Exception as e:
+        # Fallback handling if LLM API call fails or times out
         print(f"[CLASSIFIER ERROR] LLM classification failed ({type(e).__name__}: {e})")
-
         return {
             "mode": "general",
             "product": product,

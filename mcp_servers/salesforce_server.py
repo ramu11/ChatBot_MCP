@@ -1,69 +1,46 @@
+# mcp_servers/salesforce_server.py
 """
-salesforce_server.py
+Salesforce FastMCP Server for Red Hat Support Integration.
 
-MCP server providing access to Red Hat Salesforce Support APIs.
-
-Responsibilities:
-- Exposes Salesforce support operations as MCP tools.
-- Authenticates requests using a Red Hat bearer token.
-- Retrieves support case details, comments, external tracker updates,
-  and historical case search results.
-- Translates MCP tool invocations into Salesforce REST API requests.
-- Returns normalized JSON responses for consumption by the AI agent.
-
-Exposed MCP Tools:
-- get_support_case()
-- list_case_comments()
-- get_external_updates()
-- search_cases()
-- search_historical_cases()
-
-This server acts as the Salesforce integration layer for the AI Support
-Copilot and encapsulates all Salesforce API communication behind MCP.
-The agent interacts only with MCP tools and remains independent of the
-underlying Salesforce REST endpoints.
+This module exposes Red Hat Salesforce Support API operations as MCP tools.
+It handles authentication token validation, REST API calls, payload normalization,
+and structured stderr logging for MCP tool execution across support cases.
 """
 
-import requests
+import json
 import os
 import sys
-import json
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
+import requests
 from mcp.server.fastmcp import FastMCP
 
-# ------------------------------------------------
-# MCP SERVER
-# ------------------------------------------------
+# -------------------------------------------------------------
+# MCP SERVER & ENDPOINT INITIALIZATION
+# -------------------------------------------------------------
 mcp = FastMCP("redhat-salesforce-server")
 
-
-# ------------------------------------------------
-# SALESFORCE ENDPOINT
-# ------------------------------------------------
 SF_BASE_URL = "https://api.access.redhat.com/support/v1/cases"
 SF_SEARCH_BASE_URL = "https://api.access.redhat.com/support/search/v2/cases"
 
 
-"""
-Builds the HTTP headers required for Salesforce API requests.
+# -------------------------------------------------------------
+# AUTHENTICATION HELPER
+# -------------------------------------------------------------
+def get_sf_headers() -> Dict[str, str]:
+    """
+    Builds the HTTP headers required for Salesforce API requests.
 
-Retrieves the bearer token from the TOKEN environment variable and
-constructs the authorization and content negotiation headers used by
-all Salesforce REST API calls.
+    Retrieves the bearer token from the TOKEN environment variable and
+    constructs the authorization and content negotiation headers used by
+    all Salesforce REST API calls.
 
-Returns:
-    dict:
-        HTTP headers for authenticated Salesforce API requests.
+    Returns:
+        Dict[str, str]: HTTP headers for authenticated Salesforce API requests.
 
-Raises:
-    ValueError:
-        If the TOKEN environment variable is not configured.
-"""
-
-
-def get_sf_headers():
-
+    Raises:
+        ValueError: If the TOKEN environment variable is not configured.
+    """
     token = os.getenv("TOKEN")
 
     if not token:
@@ -76,45 +53,34 @@ def get_sf_headers():
     }
 
 
-"""
-Retrieves the primary details of a Red Hat support case.
-
-This tool queries the Salesforce Support API for a specific case number
-and returns a normalized subset of case information including summary,
-status, severity, product, description, and linked external trackers.
-
-Args:
-    case_id (str):
-        Red Hat support case number.
-
-Returns:
-    dict:
-        Normalized case information or an error response if the case
-        cannot be retrieved.
-"""
-
-
+# -------------------------------------------------------------
+# MCP TOOL: GET CASE DETAILS
+# -------------------------------------------------------------
 @mcp.tool()
 def get_support_case(case_id: str) -> Dict[str, Any]:
     """
-    Fetch primary details for a specific
-    Red Hat support case.
-    """
+    Retrieves primary details of a specific Red Hat support case.
 
+    Queries the Salesforce Support API for a case number and returns a
+    normalized subset of case metadata including summary, status, severity,
+    product, description, and linked external trackers.
+
+    Args:
+        case_id (str): Red Hat support case number (e.g., 8-digit numeric ID).
+
+    Returns:
+        Dict[str, Any]: Normalized case information or an error payload dict on failure.
+    """
     url = f"{SF_BASE_URL}/{case_id}"
 
     try:
-
         sys.stderr.write(f"[DEBUG] Fetching case: {case_id}\n")
 
         response = requests.get(url, headers=get_sf_headers(), timeout=15)
-
-        sys.stderr.write(f"[DEBUG] Salesforce STATUS: " f"{response.status_code}\n")
+        sys.stderr.write(f"[DEBUG] Salesforce STATUS: {response.status_code}\n")
 
         if response.status_code != 200:
-
-            sys.stderr.write(f"[ERROR] Salesforce Error: " f"{response.text}\n")
-
+            sys.stderr.write(f"[ERROR] Salesforce Error: {response.text}\n")
             return {
                 "error": f"Case {case_id} not found",
                 "status": response.status_code,
@@ -133,131 +99,91 @@ def get_support_case(case_id: str) -> Dict[str, Any]:
         }
 
     except Exception as e:
-
-        sys.stderr.write(f"[CRITICAL] get_support_case failed: " f"{str(e)}\n")
-
+        sys.stderr.write(f"[CRITICAL] get_support_case failed: {str(e)}\n")
         return {"error": str(e)}
 
 
-"""
-Retrieves all technical comments associated with a Red Hat support case.
-
-Args:
-    case_number (str):
-        Red Hat support case number.
-
-Returns:
-    list:
-        List of technical comments returned by the Salesforce API.
-        Returns an empty list if no comments are available or the
-        request fails.
-"""
-
-
+# -------------------------------------------------------------
+# MCP TOOL: LIST CASE COMMENTS
+# -------------------------------------------------------------
 @mcp.tool()
 def list_case_comments(case_number: str) -> List[Any]:
     """
-    Retrieve technical comments
-    for a Red Hat support case.
-    """
+    Retrieves all technical comments associated with a Red Hat support case.
 
+    Args:
+        case_number (str): Red Hat support case number.
+
+    Returns:
+        List[Any]: List of technical comment dictionary objects, or an empty list if
+                   no comments exist or an error occurs.
+    """
     url = f"{SF_BASE_URL}/{case_number}/comments"
 
     try:
-
         response = requests.get(url, headers=get_sf_headers(), timeout=15)
-
-        sys.stderr.write(f"[DEBUG] Comments STATUS: " f"{response.status_code}\n")
+        sys.stderr.write(f"[DEBUG] Comments STATUS: {response.status_code}\n")
 
         if response.status_code == 200:
             return response.json()
 
-        sys.stderr.write(f"[ERROR] Comments Error: " f"{response.text}\n")
-
+        sys.stderr.write(f"[ERROR] Comments Error: {response.text}\n")
         return []
 
     except Exception as e:
-
-        sys.stderr.write(f"[ERROR] list_case_comments failed: " f"{str(e)}\n")
-
+        sys.stderr.write(f"[ERROR] list_case_comments failed: {str(e)}\n")
         return []
 
 
-"""
-Retrieves updates from external trackers linked to a support case.
-
-This includes updates from integrated engineering systems such as
-Jira or Bugzilla that are associated with the specified support case.
-
-Args:
-    case_number (str):
-        Red Hat support case number.
-
-Returns:
-    list:
-        List of external tracker updates. Returns an empty list if no
-        updates are available or the request fails.
-"""
-
-
+# -------------------------------------------------------------
+# MCP TOOL: GET EXTERNAL TRACKER UPDATES
+# -------------------------------------------------------------
 @mcp.tool()
 def get_external_updates(case_number: str) -> List[Any]:
     """
-    Retrieve external Jira/Bugzilla tracker
-    updates linked to a support case.
-    """
+    Retrieves external tracker updates (Jira/Bugzilla) linked to a support case.
 
-    url = f"{SF_BASE_URL}/" f"{case_number}/externaltrackerupdates"
+    Args:
+        case_number (str): Red Hat support case number.
+
+    Returns:
+        List[Any]: List of external tracker updates, or an empty list on failure.
+    """
+    url = f"{SF_BASE_URL}/{case_number}/externaltrackerupdates"
 
     try:
-
         response = requests.get(url, headers=get_sf_headers(), timeout=15)
-
-        sys.stderr.write(
-            f"[DEBUG] External Tracker STATUS: " f"{response.status_code}\n"
-        )
+        sys.stderr.write(f"[DEBUG] External Tracker STATUS: {response.status_code}\n")
 
         if response.status_code == 200:
             return response.json()
 
-        sys.stderr.write(f"[ERROR] External Tracker Error: " f"{response.text}\n")
-
+        sys.stderr.write(f"[ERROR] External Tracker Error: {response.text}\n")
         return []
 
     except Exception as e:
-
-        sys.stderr.write(f"[ERROR] get_external_updates failed: " f"{str(e)}\n")
-
+        sys.stderr.write(f"[ERROR] get_external_updates failed: {str(e)}\n")
         return []
 
 
-"""
-Searches active Red Hat support cases using the v1 filter API.
-
-This tool filters customer support cases based on predefined criteria
-such as case status and SBR identifiers. It is intended for operational
-case filtering rather than full-text historical investigation.
-
-Args:
-    sbrs (List[str], optional):
-        List of SBR identifiers used to filter cases.
-
-    maxResults (int):
-        Maximum number of cases to return.
-
-Returns:
-    dict:
-        Dictionary containing the matching support cases or an error
-        response if the search fails.
-"""
-
-
+# -------------------------------------------------------------
+# MCP TOOL: FILTER ACTIVE CASES
+# -------------------------------------------------------------
 @mcp.tool()
 def search_cases(sbrs: List[str] = None, maxResults: int = 20) -> Dict[str, Any]:
     """
-    Search active Red Hat support cases.
-    """
+    Searches active Red Hat support cases using operational filters.
 
+    Filters cases by predefined operational statuses and SBR identifiers for operational
+    case tracking.
+
+    Args:
+        sbrs (List[str], optional): List of SBR identifier strings. Defaults to None.
+        maxResults (int, optional): Max cases to return. Defaults to 20.
+
+    Returns:
+        Dict[str, Any]: Payload containing matching cases array or an error message dict.
+    """
     url = f"{SF_BASE_URL}/filter"
 
     payload = {
@@ -273,104 +199,59 @@ def search_cases(sbrs: List[str] = None, maxResults: int = 20) -> Dict[str, Any]
     }
 
     try:
-
         response = requests.post(
             url, headers=get_sf_headers(), json=payload, timeout=15
         )
-
-        sys.stderr.write(f"[DEBUG] Search STATUS: " f"{response.status_code}\n")
+        sys.stderr.write(f"[DEBUG] Search STATUS: {response.status_code}\n")
 
         response.raise_for_status()
-
         data = response.json()
 
         return {"cases": (data if isinstance(data, list) else [data])}
 
     except Exception as e:
-
-        sys.stderr.write(f"[ERROR] search_cases failed: " f"{str(e)}\n")
-
+        sys.stderr.write(f"[ERROR] search_cases failed: {str(e)}\n")
         return {"error": f"Search failed: {str(e)}"}
 
 
-"""
-Searches historical Red Hat support cases using the Search v2 API.
-
-Performs a full-text search across historical support cases and returns
-ranked search results. This tool is primarily intended for AI-assisted
-investigation workflows where similar historical cases are analyzed to
-identify recurring issues, common resolutions, and potential root causes.
-
-Args:
-    query (str):
-        Free-text search query.
-
-    rows (int):
-        Maximum number of search results to return.
-
-    start (int):
-        Zero-based starting offset for pagination.
-
-Returns:
-    dict:
-        Raw search response containing ranked historical case results.
-        The Investigation Engine is responsible for transforming these
-        results into lightweight Case Cards for downstream LLM analysis.
-"""
-
-
-import json
-import sys
-import requests
-from typing import Dict, Any
-
-
+# -------------------------------------------------------------
+# MCP TOOL: HISTORICAL SEARCH (SOLR SEARCH v2)
+# -------------------------------------------------------------
 @mcp.tool()
 def search_historical_cases(
     query: str, rows: int = 5, start: int = 0
 ) -> Dict[str, Any]:
     """
-    Search historical Red Hat support cases using the
-    /support/search/v2/cases endpoint.
+    Executes a full-text search across historical Red Hat support cases.
 
-    Parameters
-    ----------
-    query : str
-        Free-text search query.
+    Queries the Search v2 API endpoint (`/support/search/v2/cases`) to locate
+    historical case documents matching error patterns, symptoms, or keywords for investigation workflows.
 
-    rows : int
-        Number of cases to return (default: 1).
+    Args:
+        query (str): Free-text query terms.
+        rows (int, optional): Max documents to retrieve. Defaults to 5.
+        start (int, optional): Pagination offset. Defaults to 0.
 
-    start : int
-        Zero-based offset for pagination (default: 0).
+    Returns:
+        Dict[str, Any]: Dictionary containing query metadata, retrieved Solr documents list,
+                        and raw results.
     """
-
     payload = {"q": query, "rows": rows, "start": start}
 
     try:
-
         sys.stderr.write(
-            f"[DEBUG] Historical Search Query: '{query}' "
-            f"(rows={rows}, start={start})\n"
+            f"[DEBUG] Historical Search Query: '{query}' (rows={rows}, start={start})\n"
         )
 
         headers = get_sf_headers()
-
         response = requests.post(
             SF_SEARCH_BASE_URL, headers=headers, json=payload, timeout=30
         )
 
-        sys.stderr.write(
-            f"[DEBUG] Historical Search STATUS: " f"{response.status_code}\n"
-        )
-
-        # PRINT RAW SALESFORCE/SOLR RESPONSE TO HELP DEBUG PAYLOAD ISSUES
-        # sys.stderr.write(f"[DEBUG RAW SALESFORCE RESPONSE]: {response.text}\n")
+        sys.stderr.write(f"[DEBUG] Historical Search STATUS: {response.status_code}\n")
 
         if response.status_code != 200:
-
-            sys.stderr.write(f"[ERROR] Historical Search Error: " f"{response.text}\n")
-
+            sys.stderr.write(f"[ERROR] Historical Search Error: {response.text}\n")
             return {
                 "error": f"Historical search failed ({response.status_code})",
                 "status": response.status_code,
@@ -380,12 +261,10 @@ def search_historical_cases(
 
         data = response.json()
 
-        # Extract Solr docs array (.response.docs)
+        # Extract Solr documents array from .response.docs
         docs = []
         if isinstance(data, dict):
             docs = data.get("response", {}).get("docs", [])
-
-        # sys.stderr.write(f"[DEBUG] Extracted {len(docs)} docs from Solr response.\n")
 
         return {
             "query": query,
@@ -396,14 +275,12 @@ def search_historical_cases(
         }
 
     except Exception as e:
-
-        sys.stderr.write(f"[ERROR] search_historical_cases failed: " f"{str(e)}\n")
-
+        sys.stderr.write(f"[ERROR] search_historical_cases failed: {str(e)}\n")
         return {"error": str(e), "cases": []}
 
 
-# ------------------------------------------------
-# MAIN
-# ------------------------------------------------
+# -------------------------------------------------------------
+# SERVER EXECUTION ENTRYPOINT
+# -------------------------------------------------------------
 if __name__ == "__main__":
     mcp.run()

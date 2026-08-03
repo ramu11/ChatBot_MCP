@@ -1,61 +1,91 @@
+# ChatBot_MCP
 
-```markdown
-# 🤖 ChatBot_MCP
-
-A modular, intent-aware AI Chatbot built with Python and Flask, utilizing the **Model Context Protocol (MCP)** to interact with external tools (Salesforce and Jira) and an evidence-based investigation engine.
+A modular, intent-aware AI Support Assistant built with Python and Flask, utilizing the **Model Context Protocol (MCP)** to interact with enterprise systems (Salesforce and Jira), local RAG documentation repositories, and an evidence-based historical case investigation engine.
 
 ---
 
-## 📌 Architecture Overview
+## 📌 Architectural Overview
 
+```text
+                               +-----------------------------------+
+                               |           User Interface          |
+                               +-----------------------------------+
+                                                 |
+                                                 v
+                               +-----------------------------------+
+                               |          Flask App Layer          |
+                               |              (app.py)             |
+                               +-----------------------------------+
+                                                 |
+                                                 v
+                               +-----------------------------------+
+                               |          Agent Orchestrator       |
+                               |             (agent.py)            |
+                               +-----------------------------------+
+                                                 |
+         +---------------------------------------+---------------------------------------+
+         |                                       |                                       |
+         v                                       v                                       v
++-----------------------+               +-----------------------+               +-----------------------+
+|   AI Pipeline Module  |               |     LLM Interface     |               |     Tool Router       |
+| (ai_pipeline/)        |               |       (llm.py)        |               | (tools/tool_router.py)|
+| - request_classifier  |               +-----------------------+               +-----------------------+
+| - investigation_engine|                           |                                       |
+| - docs_handler        |                           v                                       v
+| - keywords            |               +-----------------------+               +-----------------------+
++-----------------------+               |   OpenAI-Compatible   |               |       MCP Client      |
+                                        |      API Endpoint     |               | (tools/mcp_client.py) |
+                                        +-----------------------+               +-----------------------+
+                                                                                            |
+                                                                                            v
+                                                                                +-----------------------+
+                                                                                |  Salesforce / Jira    |
+                                                                                |    MCP Servers        |
+                                                                                +-----------------------+
 
 ```
 
-```
-             +-----------------------------------+
-             |           User Interface          |
-             +-----------------------------------+
-                               |
-                               v
-             +-----------------------------------+
-             |          Flask App Layer          |
-             |              (app.py)             |
-             +-----------------------------------+
-                               |
-                               v
-             +-----------------------------------+
-             |          Agent Manager            |
-             |             (agent.py)            |
-             +-----------------------------------+
-                               |
-        +----------------------+----------------------+
-        |                                             |
-        v                                             v
+---
 
-```
+## ⚙️ Deterministic Intent Evaluation Pipeline
 
-+-----------------------+                     +-----------------------+
-|  AI Pipeline Module   |                     |     LLM Interface     |
-| (ai_pipeline/)        |                     |       (llm.py)        |
-| - request_classifier  |                     +-----------------------+
-| - investigation_engine|                                 |
-| - docs_handler        |                                 v
-| - keywords            |                     +-----------------------+
-+-----------------------+                     |      Tool Router      |
-| (tools/tool_router.py)|
-+-----------------------+
-|
-v
-+-----------------------+
-|       MCP Client      |
-| (tools/mcp_client.py) |
-+-----------------------+
-|
-v
-+-----------------------+
-|     Salesforce /      |
-|     Jira Servers      |
-+-----------------------+
+Incoming queries are evaluated through a strict 5-stage deterministic priority pipeline before falling back to zero-shot LLM intent classification:
+
+```text
+                      Incoming User Request String
+                                   |
+                                   v
+             +-------------------------------------------+
+             | Priority 1: Salesforce Case ID Regex      |
+             |           (\b\d{8}\b)                     |
+             +-------------------------------------------+
+               | YES                                | NO
+               v                                    v
+      [mode = case_lookup]         +-------------------------------------------+
+                                   | Priority 2: Jira Key Regex                |
+                                   |      (\b[A-Z]{2,10}-[0-9]+\b)             |
+                                   +-------------------------------------------+
+                                     | YES                                | NO
+                                     v                                    v
+                            [mode = jira_lookup]         +-------------------------------------------+
+                                                         | Priority 3: Product Detection             |
+                                                         |       (PRODUCT_CATALOG)                   |
+                                                         +-------------------------------------------+
+                                                                              |
+                                                                              v
+                                                         +-------------------------------------------+
+                                                         | Priority 4: Investigation / Failure Terms |
+                                                         |      (is_investigation Heuristics)        |
+                                                         +-------------------------------------------+
+                                                           | YES                                | NO
+                                                           v                                    v
+                                                  [mode = investigation]       +-------------------------------------------+
+                                                                               | Priority 5: Zero-Shot LLM Fallback        |
+                                                                               |     (CLASSIFIER_PROMPT)                   |
+                                                                               +-------------------------------------------+
+                                                                                 |                       |
+                                                                                 v                       v
+                                                                       [mode = investigation]     [mode = general]
 
 ```
 
@@ -64,44 +94,215 @@ v
 ## 🛠️ Component Breakdown
 
 | Module | File | Description |
-| :--- | :--- | :--- |
-| **App Layer** | `app.py` | Flask web application handling chat routes and user sessions. |
-| **Agent Layer** | `agent.py` | Main orchestrator managing classification, data sanitization, Jira table formatting, and flow execution[cite: 1]. |
-| **AI Pipeline** | `ai_pipeline/request_classifier.py` | Classifies requests into `case_lookup`, `jira_lookup`, `investigation`, or `general` modes[cite: 3]. |
-| | `ai_pipeline/keywords.py` | Defines product catalogs, failure keywords, and query cleaning logic[cite: 2, 3]. |
-| | `ai_pipeline/investigation_engine.py` | Searches historical cases via MCP tools and builds structured diagnostic summaries[cite: 2]. |
-| | `ai_pipeline/docs_handler.py` | Fetches local documentation context for RAG enrichment[cite: 1]. |
-| **LLM Interface**| `llm.py` | Communicates with the LLM API endpoints. |
-| **Tools & MCP** | `tools/tool_router.py` | Routes tool calls to MCP clients or direct integrations[cite: 1, 2]. |
-| | `tools/mcp_client.py` | MCP protocol handler for remote tool interactions. |
+| --- | --- | --- |
+| **App Layer** | `app.py` | Flask web application managing chat HTTP routing, sessions, and request lifetimes. |
+| **Agent Orchestrator** | `agent.py` | Core workflow orchestrator executing intent classification, context-history isolation, payload sanitization, and output table formatting.
+
+ |
+| **AI Classifier** | `ai_pipeline/request_classifier.py` | Enforces the 5-stage priority routing pipeline (`case_lookup`, `jira_lookup`, `investigation`, `general`).
+
+ |
+| **Keywords Catalog** | `ai_pipeline/keywords.py` | Product catalog mappings, investigation verbs (`"list cases"`, `"search tickets"`), failure terms, and normalization rules.
+
+ |
+| **Investigation Engine** | `ai_pipeline/investigation_engine.py` | Handles multi-pass historical case search via MCP, normalizes Knowledgebase URLs, and builds structured diagnostic summaries.
+
+ |
+| **Docs RAG Handler** | `ai_pipeline/docs_handler.py` | Fetches local markdown/text documentation context for RAG enrichment when queries fall under `general` mode.
+
+ |
+| **LLM Interface** | `llm.py` | Low-level client managing sandboxing, prompt-injection isolation, raw API network exception handling, and Knowledgebase URL normalization.
+
+ |
+| **Tools & MCP Router** | `tools/tool_router.py` | Bridges backend execution functions with direct MCP tool bindings.
+
+ |
+|  | `tools/mcp_client.py` | Implements Model Context Protocol handling for remote Salesforce and Jira enterprise servers. |
 
 ---
 
-## 🔄 Core Request Flows
-
-The chatbot routes requests into one of **four distinct execution paths** based on deterministic matching and LLM intent classification[cite: 1, 3]:
+## 🔄 Execution Flows & Diagrams
 
 ### 1. Investigation Flow (`investigation`)
-* **Trigger:** Prompt contains investigation phrases or failure keywords[cite: 3] (or LLM fallback identifies an incident/troubleshooting intent)[cite: 3].
-* **Execution:** `agent.py` routes directly to `investigation_engine.py`[cite: 1]. The engine cleans the query, executes the `search_historical_cases` MCP tool, and generates an evidence-based investigation report (Executive Summary, Patterns, Root Causes, Recommendations)[cite: 2].
-* **RAG Status:** No RAG[cite: 2]. Direct historical case search + LLM synthesis[cite: 2].
 
-### 2. Salesforce Case Lookup (`case_lookup`)
-* **Trigger:** An 8-digit Salesforce case number (e.g., `12345678`) is present in the prompt[cite: 3].
-* **Execution:** `agent.py` fetches live case details and comments via MCP tools (`get_support_case`, `list_case_comments`)[cite: 1]. It extracts cross-referenced Jira IDs[cite: 1], enriches them with Jira API calls[cite: 1], redacts sensitive details via `sanitize_payload_data`[cite: 1], and formats a full summary along with a Markdown Jira table[cite: 1].
-* **RAG Status:** No RAG[cite: 1]. Direct Salesforce + Jira tool integration[cite: 1].
+* **Trigger:** Query contains explicit search verbs (`"list cases"`, `"find tickets"`), incident/failure terms (`"oom"`, `"crash"`), product + failure combinations, or zero-shot LLM classification.
 
-### 3. Jira Issue Lookup (`jira_lookup`)
-* **Trigger:** A Jira issue key (e.g., `PROJECT-1234`) is present in the prompt[cite: 3].
-* **Execution:** `agent.py` retrieves issue fields and recent comments via `jira.get_issue` and `jira.get_comments` tools[cite: 1]. The response is sanitized, summarized by the LLM, and presented with a formatted Jira details table[cite: 1].
-* **RAG Status:** No RAG[cite: 1]. Direct Jira API execution[cite: 1].
 
-### 4. General / RAG Flow (`general`)
-* **Trigger:** General technical questions, pre-upgrade guides, syntax help, or standard product queries[cite: 3].
-* **Execution:** 
-  * **Product Detected:** If `detect_product` matches a product, `agent.py` invokes `docs_handler.py`[cite: 1, 3]. If relevant context is found, it uses the `RAG_DOCS` prompt mode to synthesize an enriched response[cite: 1].
-  * **No Product / No Docs Found:** If no docs context is retrieved, it falls back to direct LLM general knowledge under the `CORE_KB` mode[cite: 1].
-* **RAG Status:** **Conditional RAG** (Only invoked when general mode detects a product and matching documentation)[cite: 1, 3].
+* **Context Protection:** Context history resolution is explicitly locked out when `request_mode == "investigation"` to prevent previous single-entity IDs from hijacking search intent.
+* **Execution:**
+1. `investigation_engine.py` cleans input text (stripping digests, container SHAs, logs).
+
+
+2. Executes historical case retrieval via MCP `search_historical_cases`.
+
+
+3. Applies `normalize_linked_resource` to rewrite raw API endpoints (`/hydra/rest/drupal/solutions/123456`) into clean public customer Knowledgebase URLs (`[https://access.redhat.com/solutions/123456](https://access.redhat.com/solutions/123456)`).
+
+
+4. Generates an evidence-based report (Pass 1 Case Listing / Pass 2 Analysis).
+
+
+
+
+
+```text
+User Input ("list kafka upgrade cases")
+   │
+   ▼
+request_classifier.py ──► mode: "investigation", product: "red_hat_streams_for_apache_kafka"
+   │
+   ▼
+agent.py (Bypasses context history resolution)
+   │
+   ▼
+investigation_engine.py
+   ├── 1. Clean query text & extract failure terms
+   ├── 2. Call MCP search_historical_cases tool
+   ├── 3. Normalize solution URLs -> https://access.redhat.com/solutions/<ID>
+   └── 4. LLM synthesis (Pass 1 Listing / Pass 2 Evidence Analysis)
+   │
+   ▼
+Structured Report Output to User
+
+```
+
+---
+
+### 2. Salesforce Case Lookup Flow (`case_lookup`)
+
+* **Trigger:** An 8-digit numerical ID (e.g., `04438091`) is detected in the query or extracted during single-entity follow-ups.
+
+
+* **Execution:**
+1. Invokes MCP tools `get_support_case` and `list_case_comments`.
+
+
+2. Scans case descriptions and comments via regex for cross-referenced Jira keys (e.g., `DBZ-8339` or `RH-1234`).
+
+
+3. Enriches the result with live Jira metadata via `jira.get_issue`.
+
+
+4. Sanitizes output via `clean_case_text` and builds a structured summary with a Markdown Jira reference table.
+
+
+
+
+
+```text
+User Input ("get case 04438091")
+   │
+   ▼
+request_classifier.py ──► Priority 1 Match: case_id = "04438091" (mode: "case_lookup")
+   │
+   ▼
+agent.py
+   ├── 1. Call MCP: get_support_case("04438091") & list_case_comments("04438091")
+   ├── 2. Scan case text for Jira keys (\b[A-Z]{2,10}-[0-9]+\b)
+   ├── 3. If Jira key found: Call MCP jira.get_issue(jira_key)
+   ├── 4. Sanitize payloads (redact SHAs, secrets, and system paths)
+   └── 5. LLM generates Case Summary + Markdown Jira Metadata Table
+   │
+   ▼
+Rendered Case + Jira Report
+
+```
+
+---
+
+### 3. Jira Issue Lookup Flow (`jira_lookup`)
+
+* **Trigger:** A project key + issue number (e.g., `DBZ-8339`) is present in the prompt.
+
+
+* **Execution:**
+1. Invokes MCP tools `jira.get_issue` and `jira.get_comments`.
+
+
+2. Redacts sensitive parameters via `sanitize_payload_data`.
+
+
+3. Passes sanitized payload to `ask_llm` to extract issue status, problem pattern, customer impact, engineering analysis, and next steps.
+
+
+4. Formats a structured Jira detail table at the bottom of the response.
+
+
+
+
+
+```text
+User Input ("show jira DBZ-8339")
+   │
+   ▼
+request_classifier.py ──► Priority 2 Match: jira_key = "DBZ-8339" (mode: "jira_lookup")
+   │
+   ▼
+agent.py
+   ├── 1. Call MCP: jira.get_issue("DBZ-8339")
+   ├── 2. Call MCP: jira.get_comments("DBZ-8339")
+   ├── 3. Sanitize raw JSON payloads
+   └── 4. LLM generates Analysis + Formatted Markdown Table
+   │
+   ▼
+Rendered Jira Analysis & Status Table
+
+```
+
+---
+
+### 4. General / Conditional RAG Flow (`general`)
+
+* **Trigger:** How-to questions, pre-upgrade guides, syntax explanations, or queries without incident indicators.
+
+
+* **Execution:**
+1. Checks for product match via `detect_product`.
+
+
+2. If a product matches, calls `docs_handler.py` to search local repository documentation.
+
+
+3. **Documentation Found:** Formulates a RAG prompt (`RAG_DOCS`) injecting local context.
+
+
+4. **No Documentation / Out-of-Scope:** Defaults to core model knowledge (`CORE_KB`) while enforcing strict system boundary constraints (e.g., declining non-technical or geopolitical topics).
+
+
+
+```text
+User Input ("how to upgrade amq streams on openshift?")
+   │
+   ▼
+request_classifier.py ──► mode: "general", product: "red_hat_streams_for_apache_kafka"
+   │
+   ▼
+agent.py ──► docs_handler.py
+   ├── 1. Search local documentation repository for matching product docs
+   ├── 2. [MATCH FOUND]: Inject local context ──► ask_llm (Prompt Mode: RAG_DOCS)
+   └── 3. [NO MATCH / OUT OF SCOPE]: Direct LLM synthesis ──► ask_llm (Prompt Mode: CORE_KB)
+   │
+   ▼
+Technical Guidance Response
+
+```
+
+---
+
+## 🧠 Architectural Highlights & Safety Features
+
+1. **Deterministic Intent Authority:** Regex and heuristic keyword matching take precedence over LLM classification to reduce token overhead, minimize execution latency, and ensure strict deterministic routing.
+
+
+2. **Context-History Isolation:** The agent prevents stale conversation memory (e.g., a previously discussed Jira ticket ID) from hijacking fresh search or investigation queries.
+
+
+3. **URL Normalization:** Raw backend storage or API URLs returned by internal search engines are automatically rewritten to public-facing customer Knowledgebase endpoints before presentation.
+
+
+4. **Network Guardrails:** Low-level network exceptions (e.g., DNS resolution failures or gateway timeouts) are caught in the HTTP execution layer (`llm.py`), preventing stack traces from leaking into the user interface.
+
+
 
 ---
 
@@ -110,16 +311,17 @@ The chatbot routes requests into one of **four distinct execution paths** based 
 ### Prerequisites
 
 * Python 3.10+
-* Environment variables configured for model APIs and credentials
+* Environment access configured for target LLM gateways and MCP endpoints
 
 ### Installation
 
 1. **Clone the repository:**
-   ```bash
-   git clone [https://github.com/ramu11/ChatBot_MCP.git](https://github.com/ramu11/ChatBot_MCP.git)
-   cd ChatBot_MCP
+```bash
+git clone https://github.com/ramu11/ChatBot_MCP.git
+cd ChatBot_MCP
 
 ```
+
 
 2. **Set up a virtual environment:**
 ```bash
@@ -136,13 +338,15 @@ pip install -r requirements.txt
 ```
 
 
-4. **Environment Setup:**
-Create a `.env` file in the root directory:
+4. **Environment Configuration:**
+Create a `.env` file in the project root:
 ```env
-MODEL_ID=your_model_id
-MODEL_API=your_llm_api_endpoint
-USER_KEY=your_llm_key
-TOKEN=your_auth_token
+MODEL_ID=gemini-3.5-flash
+MODEL_API=https://your-llm-gateway-endpoint/v1beta/openai
+USER_KEY=your_llm_api_key
+TOKEN=your_mcp_auth_token
+ATLASSIAN_EMAIL=your_email@domain.com
+ATLASSIAN_TOKEN=your_atlassian_api_token
 
 ```
 
@@ -150,11 +354,5 @@ TOKEN=your_auth_token
 5. **Run the Application:**
 ```bash
 python app.py
-
-```
-
-
-
-```
 
 ```

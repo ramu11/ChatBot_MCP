@@ -266,6 +266,18 @@ PRODUCT_CATALOG: Dict[str, Dict[str, List[str]]] = {
 # =====================================================================
 
 INVESTIGATION_KEYWORDS = [
+    # Action / Search Verbs (Added to support plural search queries)
+    "list cases",
+    "find cases",
+    "search cases",
+    "get cases",
+    "show cases",
+    "list tickets",
+    "find tickets",
+    "search tickets",
+    "list issues",
+    "find issues",
+    "search issues",
     # Incident / troubleshooting
     "issue after upgrade",
     "problem after upgrade",
