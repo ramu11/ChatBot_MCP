@@ -13,3 +13,6 @@ rag/vector_store/
 # Raw documentation input binaries
 rag/raw_pdfs/
 __pycache__/
+flask_session/
+__pycache__/
+*.pyc

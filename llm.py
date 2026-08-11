@@ -1,4 +1,3 @@
-# llm.py
 """
 Low-Level LLM Client Interface for Red Hat AI Support Assistant.
 
@@ -34,13 +33,8 @@ def clean_case_text(text: str) -> str:
     if not text:
         return ""
 
-    # Remove image digests (e.g., sha256:c9eba0d1f9fba5887...)
     text = re.sub(r"sha256:[a-f0-9]{32,64}", "[digest]", text)
-
-    # Shorten long registry URLs
     text = re.sub(r"registry\.redhat\.io\/[^\s]+", "[container-image]", text)
-
-    # Collapse repetitive whitespace/newlines
     text = re.sub(r"\s+", " ", text).strip()
 
     return text
@@ -63,7 +57,6 @@ def normalize_linked_resource(res: Any) -> List[str]:
 
     normalized_urls = []
     for url in urls:
-        # Extract solution ID from hydra/rest/drupal/solutions/<ID> or standard solution paths
         sol_match = re.search(r"solutions/(\d+)", url)
         if sol_match:
             solution_id = sol_match.group(1)
@@ -111,9 +104,14 @@ def generate_pass1_summary(
     (case_number, case_summary, case_internal_status, case_createdByName, case_linked_resource),
     applies text sanitization, normalizes Knowledgebase URLs, and calls the LLM to output the exact cases.
     """
+    if not isinstance(cases, list):
+        cases = []
+
     formatted_cases = ""
     for idx, c in enumerate(cases, 1):
-        # Extract fields prioritizing Red Hat v2 search API schema key names
+        if not isinstance(c, dict):
+            continue
+
         case_num = c.get("case_number") or c.get("case") or c.get("CaseNumber") or "N/A"
         status = (
             c.get("case_internal_status") or c.get("status") or c.get("Status") or "N/A"
@@ -157,7 +155,6 @@ Format and list all retrieved cases according to your instructions."""
         {"role": "user", "content": user_message},
     ]
 
-    # Execute call using strict zero temperature for deterministic output
     response = ask_llm(
         messages=messages,
         user_key=user_key,
@@ -168,10 +165,9 @@ Format and list all retrieved cases according to your instructions."""
         max_tokens=2500,
     )
 
-    # Extract assistant content from OpenAI response structure
     try:
         return response["choices"][0]["message"]["content"]
-    except (KeyError, IndexError):
+    except (KeyError, IndexError, TypeError):
         return "**Error:** Unable to format case list from LLM response."
 
 
@@ -179,25 +175,24 @@ Format and list all retrieved cases according to your instructions."""
 # GUARDRAIL: PROMPT INJECTION & TOKEN BOUNDARY ISOLATION
 # -------------------------------------------------------------
 def encapsulate_user_prompt(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """
-    Enforces rigid execution context isolation boundaries around unstructured user input.
-    """
+    """Enforces rigid execution context isolation boundaries around unstructured user input."""
     protected_messages = []
 
     for m in messages:
-        content = m.get("content", "")
+        if not isinstance(m, dict):
+            continue
 
-        # Truncate payloads exceeding 40,000 characters to ensure token safety
+        content = str(m.get("content", ""))
+
         if len(content) > 40000:
             content = content[:40000] + "\n...[TRUNCATED]..."
 
-        # Encase raw user input in sandbox markers to prevent system instruction overrides
         if m.get("role") == "user":
             content = (
                 f"[BEGIN USER SANDBOX CONTEXT]\n{content}\n[END USER SANDBOX CONTEXT]"
             )
 
-        protected_messages.append({"role": m["role"], "content": content})
+        protected_messages.append({"role": m.get("role", "user"), "content": content})
 
     return protected_messages
 
@@ -214,10 +209,8 @@ def ask_llm(
     temperature: float = 0.7,
     max_tokens: int = 2500,
 ) -> Dict[str, Any]:
-    """
-    Executes an HTTP POST request to the OpenAI-compatible chat completions API.
-    """
-    base_url = model_api.rstrip("/")
+    """Executes an HTTP POST request to the OpenAI-compatible chat completions API."""
+    base_url = (model_api or "").rstrip("/")
     if base_url.endswith("/v1beta/openai/chat/completions") or base_url.endswith(
         "/chat/completions"
     ):
@@ -249,7 +242,6 @@ def ask_llm(
             url, headers=headers, json=payload, verify=False, timeout=60
         )
 
-        # Parse error payload if response code is not 200 OK
         if not response.ok:
             try:
                 err_data = response.json()
@@ -284,7 +276,6 @@ def ask_llm(
         return data
 
     except requests.exceptions.RequestException as e:
-        # Check specifically for DNS / Name Resolution / Network Connection failures
         if isinstance(e, requests.exceptions.ConnectionError):
             clean_err_msg = "Unable to reach the LLM gateway. Please check network connectivity or host configuration."
         else:

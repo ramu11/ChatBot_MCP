@@ -1,118 +1,139 @@
 # tools/tool_router.py
 """
-Central Tool Router and Security Gatekeeper for Red Hat Support AI Agent.
+Central Dispatch Router for Support Agent Tool Execution.
 
-This module acts as the unified execution entry point for all external tool calls.
-It enforces a strict whitelist to block unauthorized execution or prompt injection,
-routes traffic between direct REST APIs (Jira) and MCP protocols (Salesforce),
-normalizes outputs to consistent JSON string formats, and provides defensive error catching.
+This module routes tool invocation requests from the orchestrator or agent logic to
+either local MCP stdio servers (Salesforce) or direct REST endpoints (Jira).
 """
 
 import json
+import os
 import sys
-from typing import Any, Dict, Union
+from typing import Any, Dict
 
-from tools.jira_adapter import (
-    get_comments,
-    get_issue,
-    search_issues,
-)
-from tools.mcp_client import call_tool
+import requests
+import urllib3
+from tools.mcp_client import call_tool as call_mcp_tool
+
+# Suppress unverified HTTPS warnings for corporate gateway compatibility
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Target environment parameters for direct REST integrations
+JIRA_URL = os.getenv("JIRA_URL")
+JIRA_BEARER_TOKEN = os.getenv("JIRA_BEARER_TOKEN")
 
 
-def execute_tool(tool_name: str, args: Dict[str, Any]) -> str:
+# -------------------------------------------------------------
+# SAFE JSON PARSER HELPER
+# -------------------------------------------------------------
+def _safe_json_loads(data: str) -> Any:
     """
-    Central security router and dispatcher for external agent tool execution.
+    Safely attempts to parse JSON text without raising exceptions.
+    """
+    try:
+        if isinstance(data, str) and data.strip():
+            return json.loads(data)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-    Workflow:
-        1. Validates `tool_name` against the allowed tool whitelist.
-        2. Routes Jira execution to direct REST endpoints (bypassing MCP).
-        3. Routes Salesforce execution through the MCP client layer.
-        4. Normalizes all tool outputs into valid JSON strings.
-        5. Catches and logs all execution exceptions to protect agent uptime.
+
+# -------------------------------------------------------------
+# DIRECT REST JIRA EXECUTOR
+# -------------------------------------------------------------
+def execute_jira_rest(tool_name: str, args: Dict[str, Any]) -> str:
+    """
+    Executes Jira API operations directly over HTTP REST calls.
 
     Args:
-        tool_name (str): The identifier string of the tool requested for execution.
-        args (Dict[str, Any]): Dictionary of arguments passed to the specific tool function.
+        tool_name (str): Identifier for Jira tool (e.g. "jira.get_issue", "jira.get_comments").
+        args (Dict[str, Any]): Parameters containing "issue_key".
 
     Returns:
-        str: JSON-formatted string representation of the tool execution result,
-             or JSON error message string on failure/unauthorized calls.
+        str: JSON string of HTTP response or error payload.
     """
-    # ---------------------------------------------------
-    # AUTHORIZED TOOL WHITELIST
-    # ---------------------------------------------------
-    # Strictly enforce allowed tools to prevent arbitrary execution or prompt injection attacks
-    allowed_tools = [
-        # Salesforce Tools (via MCP backend)
-        "get_support_case",
-        "search_cases",
-        "search_historical_cases",
-        "list_case_comments",
-        # Jira Tools (via direct REST API)
-        "jira.get_issue",
-        "jira.search",
-        "jira.get_comments",
-    ]
+    if not isinstance(args, dict):
+        args = {}
 
-    # ---------------------------------------------------
-    # SECURITY GATEKEEPER CHECK
-    # ---------------------------------------------------
-    if tool_name not in allowed_tools:
-        error_msg = f"Security Violation: Unauthorized tool call attempted: {tool_name}"
-        sys.stderr.write(f"[Router] {error_msg}\n")
-        return json.dumps({"error": error_msg})
+    issue_key = args.get("issue_key")
+    if not issue_key:
+        return json.dumps({"error": "Missing required 'issue_key' parameter."})
+
+    jira_base_url = (JIRA_URL or "https://redhat.atlassian.net").rstrip("/")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    if JIRA_BEARER_TOKEN:
+        headers["Authorization"] = f"Bearer {JIRA_BEARER_TOKEN}"
 
     try:
-        sys.stderr.write(f"[Router] Routing tool: {tool_name}\n")
-
-        # ---------------------------------------------------
-        # PATH 1: DIRECT JIRA REST ROUTING
-        # ---------------------------------------------------
-        # Jira bypasses MCP due to OAuth header constraints in serverless/backend contexts
         if tool_name == "jira.get_issue":
-            issue_key = args.get("issue_key")
-            if not issue_key:
-                return json.dumps({"error": "Missing required argument: 'issue_key'"})
-            result = get_issue(issue_key)
-
-        elif tool_name == "jira.search":
-            jql = args.get("jql")
-            if not jql:
-                return json.dumps({"error": "Missing required argument: 'jql'"})
-            result = search_issues(jql, max_results=args.get("max_results", 5))
-
+            url = f"{jira_base_url}/rest/api/2/issue/{issue_key}"
         elif tool_name == "jira.get_comments":
-            issue_key = args.get("issue_key")
-            if not issue_key:
-                return json.dumps({"error": "Missing required argument: 'issue_key'"})
-            result = get_comments(issue_key)
-
-        # ---------------------------------------------------
-        # PATH 2: MCP ROUTING (Salesforce / MCP Tools)
-        # ---------------------------------------------------
+            url = f"{jira_base_url}/rest/api/2/issue/{issue_key}/comment"
         else:
-            result = call_tool(tool_name, args)
+            return json.dumps({"error": f"Unknown Jira REST tool: {tool_name}"})
 
-        # ---------------------------------------------------
-        # DEFENSIVE RESULT NORMALIZATION
-        # ---------------------------------------------------
-        # Prevent null or empty string responses from disrupting downstream LLM parser
-        if result is None or result == "":
-            sys.stderr.write(f"[Router] Warning: {tool_name} returned empty result.\n")
-            return "[]"
+        sys.stderr.write(f"[JIRA REST] Invoking GET {url}\n")
+        response = requests.get(url, headers=headers, verify=False, timeout=15)
 
-        # Ensure output return format is always a valid JSON string
-        if not isinstance(result, str):
-            return json.dumps(result)
+        if not response.ok:
+            sys.stderr.write(
+                f"[JIRA REST ERROR] Status {response.status_code}: {response.text}\n"
+            )
+            return json.dumps(
+                {
+                    "error": f"Jira REST request failed with status {response.status_code}",
+                    "status_code": response.status_code,
+                    "details": response.text[:200],
+                }
+            )
 
-        return result
+        parsed_json = _safe_json_loads(response.text)
+        return (
+            json.dumps(parsed_json) if isinstance(parsed_json, dict) else response.text
+        )
+
+    except requests.exceptions.RequestException as e:
+        sys.stderr.write(f"[JIRA REST Connection Exception]: {str(e)}\n")
+        return json.dumps({"error": f"Jira REST connection failed: {str(e)}"})
+
+
+# -------------------------------------------------------------
+# MAIN TOOL ROUTER ENTRY POINT
+# -------------------------------------------------------------
+def execute_tool(tool_name: str, args: Dict[str, Any]) -> str:
+    """
+    Dispatches tool execution calls based on prefix identifier.
+
+    Args:
+        tool_name (str): Fully qualified tool name (e.g. "get_support_case", "jira.get_issue").
+        args (Dict[str, Any]): Dictionary of arguments.
+
+    Returns:
+        str: JSON string output from tool execution.
+    """
+    if not isinstance(args, dict):
+        args = {}
+
+    sys.stderr.write(
+        f"[TOOL ROUTER] Routing '{tool_name}' with args: {json.dumps(args)}\n"
+    )
+
+    try:
+        # Route 1: Jira Direct REST API tools
+        if tool_name.startswith("jira."):
+            return execute_jira_rest(tool_name, args)
+
+        # Route 2: MCP Salesforce tools (strip prefix if present)
+        mcp_tool_name = tool_name
+        if tool_name.startswith("salesforce."):
+            mcp_tool_name = tool_name.replace("salesforce.", "")
+
+        return call_mcp_tool(mcp_tool_name, args)
 
     except Exception as e:
-        # ---------------------------------------------------
-        # CRITICAL FAIL-SAFE
-        # ---------------------------------------------------
-        # Log error to stderr and return structured error JSON so agent can adjust instead of retrying
-        error_payload = {"error": f"Critical Error executing {tool_name}: {str(e)}"}
-        sys.stderr.write(f"[Router] {error_payload['error']}\n")
-        return json.dumps(error_payload)
+        sys.stderr.write(f"[TOOL ROUTER CRITICAL ERROR] Execution failed: {str(e)}\n")
+        return json.dumps({"error": f"Tool Router Error: {str(e)}"})

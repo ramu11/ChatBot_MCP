@@ -45,6 +45,20 @@ def sanitize_payload_data(text_or_obj: Any) -> Any:
     return text_or_obj
 
 
+def is_followup_summarization(query: str) -> bool:
+    """Detects if the user submitted a follow-up summarization request for previously retrieved cases."""
+    q = query.lower().strip()
+    keywords = [
+        "summarize",
+        "summary",
+        "above cases",
+        "these cases",
+        "results",
+        "findings",
+    ]
+    return any(k in q for k in keywords) and ("search" not in q and "list" not in q)
+
+
 # -------------------------------------------------------------
 # PRIVATE HELPER: LLM SUMMARY GENERATOR
 # -------------------------------------------------------------
@@ -56,7 +70,7 @@ def _generate_investigation_summary(
 ) -> str:
     """
     Delegates Pass 1 formatting to llm.generate_pass1_summary to output a clean,
-    individual case list without executive summaries.
+    individual case list without executive summaries, appending a plain-text prompt hint at the end.
     """
     # Quick exit if search returned zero historical cases
     if not cases:
@@ -67,13 +81,20 @@ def _generate_investigation_summary(
 
     try:
         # Delegate directly to llm.py Pass 1 list generator
-        return generate_pass1_summary(
+        base_summary = generate_pass1_summary(
             query=query,
             cases=clean_cases,
             user_key=user_key,
             model_api=model_api,
             model_id=MODEL_ID,
         )
+
+        # Standard plain-text hint appended at the bottom
+        action_hint = '\n\n---\n💡 **Tip**: Type **"summarize all above cases"** to view a root cause analysis and technical synthesis.'
+        if "summarize all above cases" not in base_summary.lower():
+            base_summary += action_hint
+
+        return base_summary
     except Exception as e:
         sys.stderr.write(f"[Investigation] Failed to generate summary: {e}\n")
         return "Historical cases were retrieved, but the AI summary could not be generated."
@@ -89,17 +110,66 @@ def run_investigation(
     product: Optional[str] = None,
     rows: int = 5,
     start: int = 0,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
     Main orchestrator for Pass 1 of the Incident Investigation workflow.
 
     Pipeline Steps:
-        1. Clean and optimize raw query text for search tool keyword matching.
-        2. Query top historical Salesforce cases (Pass 1 - Metadata search without comment overhead).
-        3. Send case metadata findings to LLM engine to format a clean 5-case list.
-        4. Package summary and case objects into result dictionary for caller.
+        1. Intercept follow-up requests to summarize cases previously fetched from session history.
+        2. Clean and optimize raw query text for search tool keyword matching.
+        3. Query top historical Salesforce cases (Pass 1 - Metadata search without comment overhead).
+        4. Send case metadata findings to LLM engine to format a clean 5-case list with standard text guidance.
+        5. Package summary and case objects into result dictionary for caller.
     """
-    # Step 1: Clean query string (stripping stop words, noise characters)
+    # -----------------------------------------------------------------
+    # STEP 1: FOLLOW-UP INTERCEPTION (Session Context Summarization)
+    # -----------------------------------------------------------------
+    if history and is_followup_summarization(query):
+        sys.stderr.write(
+            "[Investigation] Follow-up summarization detected. Resolving from conversation history...\n"
+        )
+
+        # Retrieve prior assistant context containing the fetched case list
+        previous_context = ""
+        for msg in reversed(history[:-1]):
+            if msg.get("role") == "assistant" and (
+                "Case " in msg.get("content", "") or "04" in msg.get("content", "")
+            ):
+                previous_context = msg.get("content", "")
+                break
+
+        if previous_context:
+            system_prompt = (
+                "You are a Senior Red Hat Support Architect.\n"
+                "The user requested a technical synthesis of the historical support cases previously retrieved in this conversation.\n\n"
+                "Instructions:\n"
+                "1. Analyze all cases provided in the prior context.\n"
+                "2. Identify core problem patterns, shared technical symptoms, and root causes.\n"
+                "3. Provide proven resolutions, workarounds, and actionable recommendations.\n\n"
+                "Output Structure:\n"
+                "## Historical Cases Technical Synthesis\n"
+                "- **Common Problem Patterns**:\n"
+                "- **Root Cause Analysis**:\n"
+                "- **Proven Resolutions & Workarounds**:\n"
+                "- **Recommended Next Steps**:"
+            )
+
+            prompt = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"Prior Retrieved Cases Context:\n{previous_context}\n\nUser Request: {query}",
+                },
+            ]
+            synthesis_res = ask_llm(prompt, user_key, model_api)["choices"][0][
+                "message"
+            ]["content"]
+            return {"summary": synthesis_res, "cases": []}
+
+    # -----------------------------------------------------------------
+    # STEP 2: NEW INVESTIGATION SEARCH
+    # -----------------------------------------------------------------
     search_query = clean_query_for_search(query)
 
     sys.stderr.write(
@@ -107,7 +177,6 @@ def run_investigation(
     )
 
     try:
-        # Step 2: Pass 1 Search - Search cases only using primary metadata
         response = execute_tool(
             "search_historical_cases",
             {"query": search_query, "rows": rows, "start": start},
@@ -128,10 +197,10 @@ def run_investigation(
         if "error" in response:
             return response
 
-        cases = response.get("cases", [])
+        cases = response.get("cases", response.get("docs", []))
         sys.stderr.write(f"[Investigation] Retrieved {len(cases)} historical cases.\n")
 
-        # Step 3: Generate clean case list via LLM
+        # Step 3: Generate clean case list via LLM with plain-text guidance
         summary = _generate_investigation_summary(
             query,
             cases,

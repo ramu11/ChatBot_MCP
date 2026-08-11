@@ -135,7 +135,16 @@ def get_tool_schemas(server_script_key: str = "get_support_case") -> Any:
     Synchronous wrapper to retrieve and cache tool schemas for orchestrators / agent initialization.
     """
     try:
-        return asyncio.run(get_cached_tool_schemas(server_script_key))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # If an async loop is already active in current thread, execute via task creation
+            return loop.run_until_complete(get_cached_tool_schemas(server_script_key))
+        else:
+            return asyncio.run(get_cached_tool_schemas(server_script_key))
     except Exception as e:
         sys.stderr.write(f"\n[MCP Client] Schema retrieval error: {str(e)}\n")
         return {"error": f"Schema retrieval error: {str(e)}"}
@@ -228,8 +237,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> str:
     """
     Synchronous wrapper used by orchestrators to execute async MCP commands.
 
-    Manages event loop execution via `asyncio.run()`, catching and formatting
-    runtime exception states gracefully.
+    Safely checks for existing event loops before invoking execution,
+    preventing runtime errors in multi-threaded/async web frameworks.
 
     Args:
         name (str): Tool identifier string.
@@ -239,7 +248,19 @@ def call_tool(name: str, args: Dict[str, Any]) -> str:
         str: JSON-formatted text result from tool execution.
     """
     try:
-        return asyncio.run(run_tool(name, args))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Nest execution if running inside an active event loop
+            import nest_asyncio
+
+            nest_asyncio.apply()
+            return loop.run_until_complete(run_tool(name, args))
+        else:
+            return asyncio.run(run_tool(name, args))
 
     except Exception as e:
         sys.stderr.write(f"\n[MCP Client] Runtime Error: {str(e)}\n")

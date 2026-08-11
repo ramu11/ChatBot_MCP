@@ -4,7 +4,7 @@ Salesforce FastMCP Server for Red Hat Support Integration.
 
 This module exposes Red Hat Salesforce Support API operations as MCP tools.
 It handles authentication token validation, REST API calls, payload normalization,
-and structured stderr logging for MCP tool execution across support cases.
+chronological case context extraction, and structured stderr logging.
 """
 
 import json
@@ -50,6 +50,78 @@ def get_sf_headers() -> Dict[str, str]:
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
+    }
+
+
+# -------------------------------------------------------------
+# MCP TOOL: CASE CONTEXT REDUCTION UTILITY
+# -------------------------------------------------------------
+@mcp.tool()
+def extract_key_case_context(
+    raw_case_data: Dict[str, Any], raw_comments_data: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Extracts chronological extremes from raw case and comment API payloads.
+
+    Slices multi-page comment histories into:
+    1. Initial Problem Statement (First comment / description)
+    2. Latest Status (Top 4 most recent comments)
+    3. External Jira Trackers (externalTrackers metadata)
+
+    Reduces context window payload size while preserving core troubleshooting signal.
+    """
+    if not isinstance(raw_comments_data, list):
+        raw_comments_data = []
+
+    # 1. Sort comments chronologically by creation date
+    sorted_comments = sorted(
+        raw_comments_data,
+        key=lambda c: c.get("createdDate", "") or c.get("created_date", ""),
+    )
+
+    # 2. Extract First Comment / Initial Statement (The "What & Why")
+    first_comment = sorted_comments[0] if sorted_comments else None
+
+    # 3. Extract Top 4 Most Recent Comments (The "Where things stand now")
+    recent_comments = sorted_comments[-4:] if len(sorted_comments) > 1 else []
+
+    # 4. Extract external Jira trackers metadata (externalTrackers)
+    external_trackers = raw_case_data.get("externalTrackers", [])
+    jira_keys = []
+    if isinstance(external_trackers, list):
+        for tracker in external_trackers:
+            if isinstance(tracker, dict) and tracker.get("issueKey"):
+                jira_keys.append(
+                    {
+                        "key": tracker.get("issueKey"),
+                        "status": tracker.get("status", "Unknown"),
+                        "title": tracker.get("title", ""),
+                    }
+                )
+
+    # 5. Build reduced context payload
+    return {
+        "case_number": raw_case_data.get("caseNumber") or raw_case_data.get("id"),
+        "subject": raw_case_data.get("subject") or raw_case_data.get("summary"),
+        "description": raw_case_data.get("description"),
+        "initial_comment": (
+            {
+                "author": first_comment.get("createdByName", "Customer"),
+                "date": first_comment.get("createdDate"),
+                "body": first_comment.get("body"),
+            }
+            if first_comment
+            else None
+        ),
+        "latest_updates": [
+            {
+                "author": c.get("createdByName", "Support Engineer"),
+                "date": c.get("createdDate"),
+                "body": c.get("body"),
+            }
+            for c in recent_comments
+        ],
+        "linked_jira_trackers": jira_keys,
     }
 
 
