@@ -19,7 +19,7 @@ from tools.mcp_client import call_tool as call_mcp_tool
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Target environment parameters for direct REST integrations
-JIRA_URL = os.getenv("JIRA_URL")
+JIRA_URL = os.getenv("JIRA_BASE_URL")
 JIRA_BEARER_TOKEN = os.getenv("JIRA_BEARER_TOKEN")
 
 
@@ -59,7 +59,7 @@ def execute_jira_rest(tool_name: str, args: Dict[str, Any]) -> str:
     if not issue_key:
         return json.dumps({"error": "Missing required 'issue_key' parameter."})
 
-    jira_base_url = (JIRA_URL or "https://redhat.atlassian.net").rstrip("/")
+    jira_base_url = (JIRA_URL).rstrip("/")
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",

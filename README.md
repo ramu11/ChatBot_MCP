@@ -160,7 +160,7 @@ Structured Report Output to User
 4. Sanitizes output via `sanitize_payload_data` and builds a structured summary with a Markdown Jira reference table.
 
 
-User Input ("get case 04206670")
+User Input ("get case 12345678")
    │
    ▼
 request_classifier.py ──► Priority 1 Match: case_id = "12345678" (mode: "case_lookup")
