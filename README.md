@@ -151,11 +151,11 @@ Structured Report Output to User
 
 ### 2. Salesforce Case Lookup Flow (`case_lookup`)
 
-* **Trigger:** An 8-digit numerical ID (e.g., `04206670`) is detected in the query or extracted during single-entity follow-ups. Multiple case IDs trigger parallel batch evaluation.
+* **Trigger:** An 8-digit numerical ID (e.g., `12345678`) is detected in the query or extracted during single-entity follow-ups. Multiple case IDs trigger parallel batch evaluation.
 * **Execution:**
 
 1. Single Case: Invokes MCP tools `get_support_case` and `list_case_comments`. Multi-Case: Invokes `batch_fetch_cases` using parallel `ThreadPoolExecutor`.
-2. Scans case descriptions and comments via regex for cross-referenced Jira keys (e.g., `CSB-7587` or `RHBAC-278`).
+2. Scans case descriptions and comments via regex for cross-referenced Jira keys (e.g., `ABC-xxxx` or `XYZ-123`).
 3. Explicitly deduplicates Jira keys and batch-fetches each unique key once.
 4. Sanitizes output via `sanitize_payload_data` and builds a structured summary with a Markdown Jira reference table.
 
@@ -163,11 +163,11 @@ Structured Report Output to User
 User Input ("get case 04206670")
    │
    ▼
-request_classifier.py ──► Priority 1 Match: case_id = "04206670" (mode: "case_lookup")
+request_classifier.py ──► Priority 1 Match: case_id = "12345678" (mode: "case_lookup")
    │
    ▼
 agent.py
-   ├── 1. Call MCP: get_support_case("04206670") & list_case_comments("04206670")
+   ├── 1. Call MCP: get_support_case("04206670") & list_case_comments("12345678")
    ├── 2. Scan case text for Jira keys (\b[A-Z]{2,10}-[0-9]+\b)
    ├── 3. Deduplicate Jira keys & batch-fetch unique keys ONCE
    ├── 4. Sanitize payloads (redact SHAs, secrets, IPs, and system paths)
@@ -182,7 +182,7 @@ Rendered Case + Jira Report
 
 ### 3. Jira Issue Lookup Flow (`jira_lookup`)
 
-* **Trigger:** A project key + issue number (e.g., `CSB-7587`) is present in the prompt. Multiple Jira keys trigger parallel batch evaluation (`summarize_and_evaluate_jiras`).
+* **Trigger:** A project key + issue number (e.g., `ABC-1234`) is present in the prompt. Multiple Jira keys trigger parallel batch evaluation (`summarize_and_evaluate_jiras`).
 * **Execution:**
 
 1. Invokes MCP tools `jira.get_issue` and `jira.get_comments`.
@@ -191,15 +191,15 @@ Rendered Case + Jira Report
 4. Formats a structured Jira detail table at the bottom of the response.
 
 
-User Input ("show jira CSB-7587")
+User Input ("show jira ABC-1234")
    │
    ▼
-request_classifier.py ──► Priority 2 Match: jira_key = "CSB-7587" (mode: "jira_lookup")
+request_classifier.py ──► Priority 2 Match: jira_key = "ABC-1234" (mode: "jira_lookup")
    │
    ▼
 agent.py
-   ├── 1. Call MCP: jira.get_issue("CSB-7587")
-   ├── 2. Call MCP: jira.get_comments("CSB-7587")
+   ├── 1. Call MCP: jira.get_issue("ABC-1234")
+   ├── 2. Call MCP: jira.get_comments("ABC-1234")
    ├── 3. Sanitize raw JSON payloads
    └── 4. LLM generates Analysis + Formatted Markdown Table
    │
@@ -249,60 +249,3 @@ Technical Guidance Response
 6. **Network Guardrails:** Low-level network exceptions (e.g., DNS resolution failures or gateway timeouts) are caught in the HTTP execution layer (`llm.py`), preventing stack traces from leaking into the user interface.
 
 ---
-
-##  Getting Started
-
-### Prerequisites
-
-* Python 3.12+
-* Environment access configured for target LLM gateways and MCP endpoints
-
-### Installation
-
-1. **Clone the repository:**
-
-```bash
-git clone [https://github.com/ramu11/ChatBot_MCP.git](https://github.com/ramu11/ChatBot_MCP.git)
-cd ChatBot_MCP
-
-```
-
-2. **Set up a virtual environment:**
-
-```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-```
-
-3. **Install dependencies:**
-
-```bash
-pip install -r requirements.txt
-
-```
-
-4. **Environment Configuration:**
-Create a `.env` file in the project root:
-
-```env
-MODEL_ID=gemini-3.5-flash
-MODEL_API=https://your-llm-gateway-endpoint/v1beta/openai
-USER_KEY=your_llm_api_key
-TOKEN=your_mcp_auth_token
-ATLASSIAN_EMAIL=your_email@domain.com
-ATLASSIAN_TOKEN=your_atlassian_api_token
-FLASK_SECRET_KEY=your_flask_secret_key
-
-```
-
-5. **Run the Application:**
-
-```bash
-python app.py
-
-```
-
-```
-
-```
