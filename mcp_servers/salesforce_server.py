@@ -20,8 +20,8 @@ from mcp.server.fastmcp import FastMCP
 # -------------------------------------------------------------
 mcp = FastMCP("redhat-salesforce-server")
 
-SF_BASE_URL = "https://api.access.redhat.com/support/v1/cases"
-SF_SEARCH_BASE_URL = "https://api.access.redhat.com/support/search/v2/cases"
+SF_BASE_URL = os.getenv("SF_BASE_URL")
+SF_SEARCH_BASE_URL = os.getenv("SF_SEARCH_BASE_URL")
 
 
 # -------------------------------------------------------------

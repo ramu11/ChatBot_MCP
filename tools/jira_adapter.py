@@ -12,7 +12,7 @@ import re
 from typing import Any, Dict, List
 import requests
 
-JIRA_BASE_URL = "https://redhat.atlassian.net"
+JIRA_BASE_URL = os.getenv("JIRA_BASE_URL")
 
 EMAIL = os.getenv("EMAIL")
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")
