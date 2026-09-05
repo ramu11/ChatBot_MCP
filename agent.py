@@ -80,6 +80,21 @@ def safe_json_loads(data: Any) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------
+# DYNAMIC CASE LIMIT EXTRACTION (STRICT MAX 10 CAP)
+# -------------------------------------------------------------
+def extract_case_limit(query: str, default: int = 5, max_cap: int = 10) -> int:
+    """
+    Extracts requested case counts from query (e.g. 'top 7 cases' -> 7).
+    Enforces a hard limit of max_cap (10) even if user requests more (e.g. 15 -> 10).
+    """
+    match = re.search(r'\b(\d+)\s+cases?\b', query.lower())
+    if match:
+        requested = int(match.group(1))
+        return min(requested, max_cap)
+    return default
+
+
+# -------------------------------------------------------------
 # CONTEXT RESOLUTION FROM HISTORY
 # -------------------------------------------------------------
 def extract_entity_from_history(
@@ -107,13 +122,13 @@ def extract_entity_from_history(
         return {
             "type": "case_id",
             "value": cases_found[0],
-            "all_values": cases_found[:5],
+            "all_values": cases_found[:10],
         }
     if jiras_found:
         return {
             "type": "jira_key",
             "value": jiras_found[0],
-            "all_values": jiras_found[:5],
+            "all_values": jiras_found[:10],
         }
 
     return {"type": None, "value": None, "all_values": []}
@@ -190,12 +205,13 @@ def fetch_case_summary_payload(case_id: str) -> Dict[str, Any]:
         return {"case_id": case_id, "error": str(err)}
 
 
-def batch_fetch_cases(case_ids: List[str]) -> List[Dict[str, Any]]:
-    """Fetches up to 5 cases in parallel using ThreadPoolExecutor."""
+def batch_fetch_cases(case_ids: List[str], limit: int = 5) -> List[Dict[str, Any]]:
+    """Fetches up to 'limit' cases (strictly max 10) in parallel using ThreadPoolExecutor."""
     results = []
-    unique_case_ids = list(dict.fromkeys(case_ids))[:5]
+    max_cases = min(limit, 10)
+    unique_case_ids = list(dict.fromkeys(case_ids))[:max_cases]
 
-    with ThreadPoolExecutor(max_workers=min(len(unique_case_ids), 5)) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(unique_case_ids), 10)) as executor:
         future_to_case = {
             executor.submit(fetch_case_summary_payload, cid): cid
             for cid in unique_case_ids
@@ -366,6 +382,9 @@ def run_agent(
         f"confidence={confidence}"
     )
 
+    # Dynamically extract case count request (capped at max 10)
+    num_cases_requested = extract_case_limit(current_message, default=5, max_cap=10)
+
     try:
         if request_mode == "investigation":
             result = run_investigation(
@@ -373,6 +392,7 @@ def run_agent(
                 user_key=user_key,
                 model_api=model_api,
                 product=product or "OpenShift",
+                rows=num_cases_requested,
                 history=messages,
             )
             if isinstance(result, dict):
@@ -387,7 +407,7 @@ def run_agent(
                 log(
                     f"[BATCH] Processing {len(case_ids)} candidate historical cases in parallel..."
                 )
-                raw_cases = batch_fetch_cases(case_ids)
+                raw_cases = batch_fetch_cases(case_ids, limit=num_cases_requested)
                 return summarize_and_evaluate_cases(
                     query=current_message,
                     cases=raw_cases,

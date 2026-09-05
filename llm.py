@@ -78,6 +78,7 @@ For EACH case retrieved, output ONLY the following format:
 
 **Case Number:** <Case Number>
 * **Status:** <Status>
+* **Created Date:** <Created Date>
 * **Summary:** <Summary>
 * **Created By:** <Created By>
 * **Linked Resources:** <Comma-separated URLs or 'None'>
@@ -116,6 +117,14 @@ def generate_pass1_summary(
         status = (
             c.get("case_internal_status") or c.get("status") or c.get("Status") or "N/A"
         )
+        created_date = (
+            c.get("case_createdDate")
+            or c.get("createdDate")
+            or c.get("created_date")
+            or c.get("CreatedDate")
+            or c.get("createdDate_dt")
+            or "N/A"
+        )
         summary = clean_case_text(
             c.get("case_summary") or c.get("summary") or c.get("Subject") or "N/A"
         )
@@ -138,6 +147,7 @@ def generate_pass1_summary(
 Case {idx}:
 - Case Number: {case_num}
 - Status: {status}
+- Created Date: {created_date}
 - Summary: {summary}
 - Created By: {created_by}
 - Linked Resources: {', '.join(linked_res) if linked_res else 'None'}
@@ -169,7 +179,6 @@ Format and list all retrieved cases according to your instructions."""
         return response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         return "**Error:** Unable to format case list from LLM response."
-
 
 # -------------------------------------------------------------
 # GUARDRAIL: PROMPT INJECTION & TOKEN BOUNDARY ISOLATION

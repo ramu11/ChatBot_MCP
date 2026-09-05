@@ -2,23 +2,30 @@
 """
 Investigation Engine Module for Red Hat Support AI Assistant.
 
-This module executes deep incident investigation workflows across historical support cases.
-It normalizes user query terms, interfaces with the Salesforce case search tool,
-and leverages the LLM to synthesize evidence-based, structured investigation reports.
+Executes incident investigation workflows by fetching raw historical support cases,
+performing date and status filtering locally in Python, and synthesizing
+findings via LLM.
 """
 
+from datetime import datetime
 import json
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set
 
-from ai_pipeline.docs_handler import handle_docs_query
-from ai_pipeline.keywords import clean_query_for_search
+from ai_pipeline.keywords import (
+    clean_query_for_search,
+    extract_date_filter,
+    extract_status_filter,
+    extract_product,
+    CASE_STATUS_MAP,
+    PRODUCT_CATALOG,
+    INVESTIGATION_KEYWORDS,
+)
 from llm import ask_llm, generate_pass1_summary
 from tools.tool_router import execute_tool
 
-# Environment configuration
 USER_KEY = os.getenv("USER_KEY")
 MODEL_API = os.getenv("MODEL_API")
 TOKEN = os.getenv("TOKEN")
@@ -46,41 +53,123 @@ def sanitize_payload_data(text_or_obj: Any) -> Any:
 
 
 def is_followup_summarization(query: str) -> bool:
-    """Detects if the user submitted a follow-up summarization request for previously retrieved cases."""
+    """Detects if the user submitted a follow-up summarization request for retrieved cases."""
+    if not query:
+        return False
+
     q = query.lower().strip()
-    keywords = [
-        "summarize",
-        "summary",
-        "above cases",
-        "these cases",
-        "results",
-        "findings",
+    summary_intent_terms = [
+        kw for kw in INVESTIGATION_KEYWORDS
+        if any(term in kw for term in ["summary", "summarize", "pattern", "trend", "root cause"])
     ]
-    return any(k in q for k in keywords) and ("search" not in q and "list" not in q)
+    summary_intent_terms.extend(["summarize", "summary", "above cases", "these cases", "results", "findings"])
+
+    has_summary_intent = any(term in q for term in summary_intent_terms)
+    has_search_verb = any(v in q for v in ["search", "list", "find", "get", "show"])
+
+    return has_summary_intent and not has_search_verb
 
 
-# -------------------------------------------------------------
-# PRIVATE HELPER: LLM SUMMARY GENERATOR
-# -------------------------------------------------------------
+def filter_cases_by_status_and_date(
+    cases: List[Dict[str, Any]],
+    query: str,
+    date_filter: dict
+) -> List[Dict[str, Any]]:
+    """Applies Python-level filtering for both Status and Date criteria."""
+    if not cases:
+        return []
+
+    q = query.lower()
+    filtered_cases = []
+
+    # 1. PARSE SPECIFIC TARGET STATUSES FROM QUERY
+    target_statuses: Set[str] = set()
+    for exact_status, phrases in CASE_STATUS_MAP.items():
+        for phrase in phrases:
+            if re.search(r"\b" + re.escape(phrase) + r"\b", q):
+                target_statuses.add(exact_status.lower())
+
+    # Detect general open/pending/active intent
+    is_general_pending = bool(
+        re.search(r"\b(waiting|open|active|unresolved|pending|long\s+running)\b", q)
+    )
+
+    # 2. PARSE EXPECTED DATE BOUNDS
+    target_dt = None
+    date_field = date_filter.get("field", "CreatedDate") if date_filter else "CreatedDate"
+    if date_filter and "value" in date_filter:
+        try:
+            target_str = date_filter["value"].replace("Z", "+00:00")
+            target_dt = datetime.fromisoformat(target_str)
+        except Exception:
+            target_dt = None
+
+    # 3. EVALUATE EACH CASE
+    for case in cases:
+        # Debug schema keys on the first item
+        if cases.index(case) == 0:
+            sys.stderr.write(f"[DEBUG SOLR SCHEMA KEYS]: {list(case.keys())}\n")
+            sys.stderr.write(f"[DEBUG SAMPLE STATUS]: {case.get('case_internal_status')} / {case.get('status')}\n")
+            sys.stderr.write(f"[DEBUG SAMPLE DATE]: {case.get('case_createdDate')} / {case.get('createdDate')}\n")
+
+        # Extract case status across potential backend field variants
+        case_status = str(
+            case.get("case_internal_status")
+            or case.get("status")
+            or case.get("Status")
+            or ""
+        ).strip().lower()
+
+        # --- STATUS CHECK ---
+        if target_statuses:
+            # If explicit status mapped, match substring
+            if not any(ts in case_status for ts in target_statuses):
+                continue
+        elif is_general_pending:
+            # Exclude closed/resolved variants using substring matching
+            if any(term in case_status for term in ["closed", "resolved", "completed", "cancelled", "canceled"]):
+                continue
+
+        # --- DATE CHECK ---
+        if target_dt:
+            raw_date = (
+                case.get("case_createdDate")
+                or case.get(date_field)
+                or case.get("createdDate")
+                or case.get("created_date")
+                or case.get("createdDate_dt")
+                or case.get("CreatedDate")
+            )
+            if raw_date:
+                try:
+                    clean_date = str(raw_date).replace("Z", "+00:00")
+                    case_dt = datetime.fromisoformat(clean_date)
+
+                    operator = date_filter.get("operator", "<=")
+                    if operator in ["<=", "<"] and case_dt > target_dt:
+                        continue
+                    elif operator in [">=", ">"] and case_dt < target_dt:
+                        continue
+                except Exception:
+                    pass
+
+        filtered_cases.append(case)
+
+    return filtered_cases
+
 def _generate_investigation_summary(
     query: str,
     cases: List[Dict[str, Any]],
     user_key: str,
     model_api: str,
 ) -> str:
-    """
-    Delegates Pass 1 formatting to llm.generate_pass1_summary to output a clean,
-    individual case list without executive summaries, appending a plain-text prompt hint at the end.
-    """
-    # Quick exit if search returned zero historical cases
+    """Delegates Pass 1 formatting to llm.generate_pass1_summary."""
     if not cases:
-        return "No historical cases were found matching the query."
+        return "No historical cases were found matching the specified query, status, and date criteria."
 
-    # Sanitize case payload data prior to LLM submission
     clean_cases = sanitize_payload_data(cases)
 
     try:
-        # Delegate directly to llm.py Pass 1 list generator
         base_summary = generate_pass1_summary(
             query=query,
             cases=clean_cases,
@@ -89,7 +178,6 @@ def _generate_investigation_summary(
             model_id=MODEL_ID,
         )
 
-        # Standard plain-text hint appended at the bottom
         action_hint = '\n\n---\n💡 **Tip**: Type **"summarize all above cases"** to view a root cause analysis and technical synthesis.'
         if "summarize all above cases" not in base_summary.lower():
             base_summary += action_hint
@@ -100,9 +188,6 @@ def _generate_investigation_summary(
         return "Historical cases were retrieved, but the AI summary could not be generated."
 
 
-# -------------------------------------------------------------
-# MAIN INVESTIGATION WORKFLOW
-# -------------------------------------------------------------
 def run_investigation(
     query: str,
     user_key: str,
@@ -112,30 +197,15 @@ def run_investigation(
     start: int = 0,
     history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    """
-    Main orchestrator for Pass 1 of the Incident Investigation workflow.
+    """Orchestrates historical search retrieval and Python-side filtering."""
 
-    Pipeline Steps:
-        1. Intercept follow-up requests to summarize cases previously fetched from session history.
-        2. Clean and optimize raw query text for search tool keyword matching.
-        3. Query top historical Salesforce cases (Pass 1 - Metadata search without comment overhead).
-        4. Send case metadata findings to LLM engine to format a clean 5-case list with standard text guidance.
-        5. Package summary and case objects into result dictionary for caller.
-    """
-    # -----------------------------------------------------------------
-    # STEP 1: FOLLOW-UP INTERCEPTION (Session Context Summarization)
-    # -----------------------------------------------------------------
+    # Handle conversation follow-ups
     if history and is_followup_summarization(query):
-        sys.stderr.write(
-            "[Investigation] Follow-up summarization detected. Resolving from conversation history...\n"
-        )
+        sys.stderr.write("[Investigation] Follow-up summarization detected. Resolving from conversation history...\n")
 
-        # Retrieve prior assistant context containing the fetched case list
         previous_context = ""
         for msg in reversed(history[:-1]):
-            if msg.get("role") == "assistant" and (
-                "Case " in msg.get("content", "") or "04" in msg.get("content", "")
-            ):
+            if msg.get("role") == "assistant" and ("Case " in msg.get("content", "") or "04" in msg.get("content", "")):
                 previous_context = msg.get("content", "")
                 break
 
@@ -157,59 +227,67 @@ def run_investigation(
 
             prompt = [
                 {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": f"Prior Retrieved Cases Context:\n{previous_context}\n\nUser Request: {query}",
-                },
+                {"role": "user", "content": f"Prior Retrieved Cases Context:\n{previous_context}\n\nUser Request: {query}"},
             ]
-            synthesis_res = ask_llm(prompt, user_key, model_api)["choices"][0][
-                "message"
-            ]["content"]
+            synthesis_res = ask_llm(prompt, user_key, model_api)["choices"][0]["message"]["content"]
             return {"summary": synthesis_res, "cases": []}
 
-    # -----------------------------------------------------------------
-    # STEP 2: NEW INVESTIGATION SEARCH
-    # -----------------------------------------------------------------
+    # Extract clean search query
     search_query = clean_query_for_search(query)
 
+    if not search_query or search_query == "*:*":
+        detected_product = product or extract_product(query)
+        if detected_product and detected_product in PRODUCT_CATALOG:
+            keywords = PRODUCT_CATALOG[detected_product].get("keywords", [])
+            if keywords:
+                search_query = keywords[0]
+
+    date_filter = extract_date_filter(query)
+
     sys.stderr.write(
-        f"[Investigation] Raw Query: '{query}' -> Search Query: '{search_query}'\n"
+        f"[Investigation] Raw Query: '{query}' -> Solr Term: '{search_query}' | Python Date Filter: {date_filter}\n"
     )
 
+    # Fetch 50 cases from Solr so Python filtering has a large pool to work with
+    tool_payload = {
+        "query": search_query,
+        "rows": 50,
+        "start": start,
+    }
+
     try:
-        response = execute_tool(
-            "search_historical_cases",
-            {"query": search_query, "rows": rows, "start": start},
-        )
+        response = execute_tool("search_historical_cases", tool_payload)
 
         if not response:
             return {"error": "Empty response from Salesforce search."}
 
-        # Safe parsing of response if serialized string is returned
         if isinstance(response, str):
             try:
                 response = json.loads(response)
             except json.JSONDecodeError:
-                return {
-                    "error": "Failed to parse JSON response from Salesforce search tool."
-                }
+                return {"error": "Failed to parse JSON response from Salesforce search tool."}
 
         if "error" in response:
             return response
 
-        cases = response.get("cases", response.get("docs", []))
-        sys.stderr.write(f"[Investigation] Retrieved {len(cases)} historical cases.\n")
+        raw_cases = response.get("cases", response.get("docs", []))
+        sys.stderr.write(f"[Investigation] Retrieved {len(raw_cases)} raw cases from Solr.\n")
 
-        # Step 3: Generate clean case list via LLM with plain-text guidance
+        # Apply Python Date + Status Filtering
+        filtered_cases = filter_cases_by_status_and_date(raw_cases, query, date_filter)
+        sys.stderr.write(f"[Investigation] {len(filtered_cases)} cases matched Python Status/Date criteria.\n")
+
+        # Limit to target requested rows (e.g. top 5)
+        final_cases = filtered_cases[:rows]
+
         summary = _generate_investigation_summary(
             query,
-            cases,
+            final_cases,
             user_key,
             model_api,
         )
 
-        # Step 4: Return packaged summary and raw retrieved case data
-        return {"summary": summary, "cases": cases}
+        return {"summary": summary, "cases": final_cases}
 
     except Exception as e:
         sys.stderr.write(f"[Investigation] Failed: {str(e)}\n")

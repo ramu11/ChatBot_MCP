@@ -10,7 +10,7 @@ chronological case context extraction, and structured stderr logging.
 import json
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from mcp.server.fastmcp import FastMCP
@@ -291,7 +291,11 @@ def search_cases(sbrs: List[str] = None, maxResults: int = 20) -> Dict[str, Any]
 # -------------------------------------------------------------
 @mcp.tool()
 def search_historical_cases(
-    query: str, rows: int = 5, start: int = 0
+    query: str,
+    rows: int = 5,
+    start: int = 0,
+    date_filter: Optional[Dict[str, Any]] = None,
+    status_filter: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Executes a full-text search across historical Red Hat support cases.
@@ -303,21 +307,35 @@ def search_historical_cases(
         query (str): Free-text query terms.
         rows (int, optional): Max documents to retrieve. Defaults to 5.
         start (int, optional): Pagination offset. Defaults to 0.
+        date_filter (dict, optional): Optional date filters.
+        status_filter (str, optional): Optional Solr status filter clause appended to search query.
 
     Returns:
         Dict[str, Any]: Dictionary containing query metadata, retrieved Solr documents list,
                         and raw results.
     """
-    payload = {"q": query, "rows": rows, "start": start}
+    # Clean and strip inputs to prevent path/query formatting errors
+    safe_query = query.strip() if query else "*:*"
+
+    if status_filter:
+        safe_query = f"({safe_query}) AND ({status_filter})"
+
+    # Sanitize search base URL string
+    target_url = SF_SEARCH_BASE_URL.strip().rstrip("/") if SF_SEARCH_BASE_URL else ""
+
+    payload = {"q": safe_query, "rows": min(rows, 100), "start": max(0, start)}
+
+    if date_filter:
+        payload["date_filter"] = date_filter
 
     try:
         sys.stderr.write(
-            f"[DEBUG] Historical Search Query: '{query}' (rows={rows}, start={start})\n"
+            f"[DEBUG] Historical Search Query: '{safe_query}' (rows={payload['rows']}, start={start}, status_filter='{status_filter}')\n"
         )
 
         headers = get_sf_headers()
         response = requests.post(
-            SF_SEARCH_BASE_URL, headers=headers, json=payload, timeout=30
+            target_url, headers=headers, json=payload, timeout=30
         )
 
         sys.stderr.write(f"[DEBUG] Historical Search STATUS: {response.status_code}\n")
@@ -339,9 +357,9 @@ def search_historical_cases(
             docs = data.get("response", {}).get("docs", [])
 
         return {
-            "query": query,
+            "query": safe_query,
             "start": start,
-            "rows": rows,
+            "rows": payload["rows"],
             "cases": docs,
             "results": data,
         }
