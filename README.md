@@ -84,6 +84,9 @@ Incoming queries are evaluated through a strict 5-stage deterministic priority p
                                                                                                |                       |
                                                                                                v                       v
                                                                                      [mode = investigation]     [mode = general]
+
+---
+                                                                                     
 ## 🛠️ Component Breakdown
 
 | Module | File | Description |
@@ -113,6 +116,9 @@ Incoming queries are evaluated through a strict 5-stage deterministic priority p
 2. Executes historical case retrieval via MCP `search_historical_cases`.
 3. Applies `normalize_linked_resource` to rewrite raw API endpoints (`/hydra/rest/drupal/solutions/123456`) into clean public customer Knowledgebase URLs (`https://access.redhat.com/solutions/123456`).
 4. Generates an evidence-based report (Pass 1 Case Listing with plain-text prompt guidance / Pass 2 Context Synthesis).
+
+---
+
 
 User Input ("list kafka cert related cases")
    │
